@@ -94,7 +94,7 @@ form .row>*{flex:1 1 120px}
 </main><div class="toast hide" id="toast"></div>
 <script>
 const $=id=>document.getElementById(id);
-let S=null,T=null,offset=0,range=30;
+let S=null,T=null,offset=0,range=30,weeks=1;
 const fmt=s=>{s=Math.round(s);return Math.floor(s/3600)+':'+String(Math.floor(s/60)%60).padStart(2,'0')+':'+String(s%60).padStart(2,'0')};
 const fmtm=s=>Math.floor(s/3600)+':'+String(Math.floor(s/60)%60).padStart(2,'0');
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -149,11 +149,12 @@ function render(){
  const ent=Object.entries(pj).sort((a,b)=>b[1]-a[1]),mx=ent.length?ent[0][1]:1;
  $('byProj').innerHTML=ent.length?ent.map(([n,v])=>`<div class="pr"><div class="n"><i class="dot" style="background:${pcolor(n)}"></i>${esc(n)}</div><div class="bar"><i style="width:${v/mx*100}%;background:${pcolor(n)}"></i></div><div class="v">${fmtm(v)}</div></div>`).join(''):'<div style="color:var(--dim);font-size:13px">Nothing logged in this period.</div>';
  // list
- let l='',lastD='';const dayTot=by;
- for(const s of S.sessions.slice(0,200)){
+ let l='',lastD='';const dayTot=by,cutoff=iso(new Date(t0.getTime()-(7*weeks-1)*864e5)),shown=S.sessions.filter(x=>x.day>=cutoff),more=S.sessions.length>shown.length;   // last 7 days, 'Load more' adds another week
+ for(const s of shown){
   if(s.day!=lastD){lastD=s.day;l+=`<div class="day">${fromIso(s.day).toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short',year:'numeric'})}<span>${fmt(dayTot[s.day])}</span></div>`}
   l+=`<div class="sess"><i class="dot" style="background:${pcolor(s.project)}"></i><div class="m">${esc(s.project||'No project')}${s.start?`<small>${s.start}–${s.end}${s.note?' · '+esc(s.note):''}</small>`:s.note?`<small>${esc(s.note)}</small>`:''}</div><div class="d">${fmt(s.seconds)}</div>${S.edit?`<button class="btn sm" data-x="${s.id}">✕</button>`:''}</div>`}
- $('list').innerHTML=l||'<div style="color:var(--dim)">No sessions yet.</div>';
+ if(!l)l=`<div style="color:var(--dim)">${S.sessions.length?`No sessions in the last ${7*weeks} days.`:'No sessions yet.'}</div>`;
+ $('list').innerHTML=l+(more?'<div style="text-align:center;margin-top:12px"><button class="btn" data-more="1">Load more</button></div>':'');
  if(S.edit){projOptions($('tproj'),T?T.project:'');renderSettings()}
 }
 
@@ -205,7 +206,7 @@ $('tproj').onchange=async()=>{if($('tproj').value=='__new'){const n=(prompt('Pro
 $('tnote').onchange=()=>tcall('POST','/api/timer/label',label());
 
 // ---- form
-$('list').onclick=async e=>{const x=e.target.dataset.x;if(x){if(confirm('Delete this session?')){await api('DELETE','/api/session/'+x);await load()}return}};
+$('list').onclick=async e=>{if(e.target.dataset.more){weeks++;return render()}const x=e.target.dataset.x;if(x){if(confirm('Delete this session?')){await api('DELETE','/api/session/'+x);await load()}return}};
 
 // ---- settings
 $('gear').onclick=()=>$('setCard').classList.toggle('hide');
