@@ -152,11 +152,12 @@ def test_todos(c):
     from fastapi.testclient import TestClient as TC
     c.post("/api/login", json={"password": os.environ["EDIT_PASSWORD"]}); anon = TC(main.app, base_url="https://testserver")
     assert anon.post("/api/todo", json={"text": "x"}).status_code == 401 and anon.get("/api/state").json()["todos"] == []
-    assert c.post("/api/todo", json={"text": "  "}).status_code == 400
-    l = c.post("/api/todo", json={"text": "Check SPN secrets"}).json()["todos"]; a = l[-1]["id"]
-    b = c.post("/api/todo", json={"text": "Renew certificates"}).json()["todos"][-1]["id"]
-    l = c.post(f"/api/todo/{a}", json={"done": True}).json()["todos"]
-    assert [t["text"] for t in l][-1] == "Check SPN secrets" and l[-1]["done"] and not l[0]["done"]       # done items sink to the bottom
-    assert anon.get("/api/state").json()["todos"] == [] and len(c.get("/api/state").json()["todos"]) == len(l)
-    assert all(t["id"] != a for t in c.delete("/api/todos/done").json()["todos"])
-    assert all(t["id"] != b for t in c.delete(f"/api/todo/{b}").json()["todos"])
+    assert c.post("/api/todo", json={"text": "  "}).status_code == 400 and c.post("/api/todo", json={"text": "x", "status": "nope"}).status_code == 400
+    a = c.post("/api/todo", json={"text": "Check SPN secrets"}).json()["todos"][-1]; assert a["status"] == "todo"
+    b = c.post("/api/todo", json={"text": "Waiting for IT", "status": "hold"}).json()["todos"][-1]; assert b["status"] == "hold"
+    assert c.post(f"/api/todo/{a['id']}", json={"status": "bad"}).status_code == 400
+    st = {t["id"]: t["status"] for t in c.post(f"/api/todo/{a['id']}", json={"status": "review"}).json()["todos"]}; assert st[a["id"]] == "review" and st[b["id"]] == "hold"
+    st = {t["id"]: t["status"] for t in c.post(f"/api/todo/{a['id']}", json={"status": "finished"}).json()["todos"]}; assert st[a["id"]] == "finished"
+    assert anon.get("/api/state").json()["todos"] == []
+    left = {t["id"]: t["status"] for t in c.delete("/api/todos/done").json()["todos"]}; assert a["id"] not in left and left[b["id"]] == "hold"   # only Finished is cleared
+    assert b["id"] not in {t["id"] for t in c.delete(f"/api/todo/{b['id']}").json()["todos"]}

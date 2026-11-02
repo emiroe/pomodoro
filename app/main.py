@@ -21,6 +21,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS sessions_client_id ON sessions(client_id) WHER
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS ended_at timestamptz;   -- set for timer sessions (start = ended_at - seconds); NULL for manual/Reset Day ones
 CREATE INDEX IF NOT EXISTS sessions_day ON sessions(day);
 CREATE TABLE IF NOT EXISTS todos (id serial PRIMARY KEY, text text NOT NULL, done boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE todos ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'todo';
+UPDATE todos SET status='finished' WHERE done AND status='todo';   -- before the tabs existed 'done' was the only state
 CREATE TABLE IF NOT EXISTS projects (name text PRIMARY KEY, color text NOT NULL DEFAULT '#7c9cff', position serial);
 CREATE TABLE IF NOT EXISTS settings (key text PRIMARY KEY, value text NOT NULL);
 INSERT INTO settings VALUES ('focus_min','25'),('short_min','5'),('long_min','15'),('long_every','4'),('daily_goal','8') ON CONFLICT DO NOTHING;
@@ -124,24 +126,27 @@ def state(req: Request):
         todos = todo_list(c) if authed(req) else []      # the to-do list is private: only shown when logged in
     return {"edit": authed(req), "sessions": [srow(r) for r in rows], "projects": projects, "settings": st, "today": today().isoformat(), "todos": todos}
 
-def todo_list(c):
-    return [{"id": r[0], "text": r[1], "done": r[2]} for r in c.execute("SELECT id,text,done FROM todos ORDER BY done, id").fetchall()]
+TODO_STATUS = ("todo", "hold", "review", "finished")
 
-class Todo(BaseModel): text: str | None = None; done: bool | None = None
+def todo_list(c):
+    return [{"id": r[0], "text": r[1], "status": r[2]} for r in c.execute("SELECT id,text,status FROM todos ORDER BY id").fetchall()]
+
+class Todo(BaseModel): text: str | None = None; status: str | None = None
 
 @app.post("/api/todo")
 def todo_add(b: Todo, req: Request):
     need_auth(req)
-    text = (b.text or "").strip()[:200]
-    if not text: raise HTTPException(400, "empty to-do")
+    text = (b.text or "").strip()[:200]; status = b.status or "todo"
+    if not text or status not in TODO_STATUS: raise HTTPException(400, "bad to-do")
     with pool.connection() as c:
-        c.execute("INSERT INTO todos(text) VALUES (%s)", (text,)); return {"todos": todo_list(c)}
+        c.execute("INSERT INTO todos(text,status,done) VALUES (%s,%s,%s)", (text, status, status == "finished")); return {"todos": todo_list(c)}
 
 @app.post("/api/todo/{tid}")
 def todo_update(tid: int, b: Todo, req: Request):
     need_auth(req)
+    if b.status is not None and b.status not in TODO_STATUS: raise HTTPException(400, "bad status")
     with pool.connection() as c:
-        if b.done is not None: c.execute("UPDATE todos SET done=%s WHERE id=%s", (b.done, tid))
+        if b.status is not None: c.execute("UPDATE todos SET status=%s, done=%s WHERE id=%s", (b.status, b.status == "finished", tid))
         if b.text is not None and b.text.strip(): c.execute("UPDATE todos SET text=%s WHERE id=%s", (b.text.strip()[:200], tid))
         return {"todos": todo_list(c)}
 
@@ -153,9 +158,9 @@ def todo_delete(tid: int, req: Request):
 
 @app.delete("/api/todos/done")
 def todo_clear_done(req: Request):
-    need_auth(req)
+    need_auth(req)   # clears the Finished tab
     with pool.connection() as c:
-        c.execute("DELETE FROM todos WHERE done"); return {"todos": todo_list(c)}
+        c.execute("DELETE FROM todos WHERE status='finished'"); return {"todos": todo_list(c)}
 
 def check(b: Session):
     try: datetime.date.fromisoformat(b.day)
