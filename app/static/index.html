@@ -71,6 +71,7 @@ form .row>*{flex:1 1 120px}
 </style></head><body><main>
 <div class="top"><h1>🍅 Pomodoro</h1><button class="btn ico" id="refresh" title="Reload">↻</button><button class="btn ico hide" id="gear" title="Settings">⚙</button><button class="btn" id="auth">Log in</button></div>
 
+<form class="card hide" id="login" autocomplete="on"><div class="row"><input type="password" id="pw" placeholder="Edit password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" required><button class="btn pri" style="flex:0 0 auto">Log in</button></div></form>
 <div class="card hide" id="timerCard"><div class="tpanel" id="tp"><div class="ring" id="ring"><div class="in"><div class="timer" id="clock">25:00</div><small id="phase">Focus</small></div></div>
 <div class="tside"><div class="dots" id="dots"></div>
 <select id="tproj"></select><input id="tnote" placeholder="What are you working on?" maxlength="300" enterkeyhint="done">
@@ -217,8 +218,8 @@ $('pjList').onchange=async e=>{const n=e.target.dataset.pc;if(n){await api('POST
 $('pjList').onclick=async e=>{const n=e.target.dataset.pd;if(n&&confirm(`Remove "${n}" from the list? Logged sessions keep the name.`)){await api('DELETE','/api/project/'+encodeURIComponent(n));await load()}};
 $('range').onclick=e=>{const r=e.target.dataset.r;if(r==null)return;range=+r;for(const b of $('range').children)b.classList.toggle('on',b.dataset.r==r);render()};
 $('refresh').onclick=()=>location.reload();
-$('auth').onclick=async()=>{if(S.edit){await api('POST','/api/logout');return load()}
- const p=prompt('Edit password');if(!p)return;try{await api('POST','/api/login',{password:p});await load()}catch(e){toast('Wrong password')}};
+$('auth').onclick=async()=>{if(S.edit){await api('POST','/api/logout');return load()}$('login').classList.toggle('hide');if(!$('login').classList.contains('hide'))$('pw').focus()};
+$('login').onsubmit=async e=>{e.preventDefault();try{await api('POST','/api/login',{password:$('pw').value.trim()});$('pw').value='';$('login').classList.add('hide');await load()}catch(er){toast('Wrong password')}};
 setInterval(renderTimer,250);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&S&&S.edit)load()});
 load().catch(e=>toast(e.message));
