@@ -16,6 +16,7 @@ pool = ConnectionPool(DB, min_size=1, max_size=5, open=False)
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (id serial PRIMARY KEY, day date NOT NULL, seconds int NOT NULL CHECK (seconds > 0 AND seconds <= 86400),
   project text NOT NULL DEFAULT '', note text NOT NULL DEFAULT '', pomodoro boolean NOT NULL DEFAULT false, updated_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS ended_at timestamptz;   -- set for timer sessions (start = ended_at - seconds); NULL for manual/Reset Day ones
 CREATE INDEX IF NOT EXISTS sessions_day ON sessions(day);
 CREATE TABLE IF NOT EXISTS projects (name text PRIMARY KEY, color text NOT NULL DEFAULT '#7c9cff', position serial);
 CREATE TABLE IF NOT EXISTS settings (key text PRIMARY KEY, value text NOT NULL);
@@ -66,13 +67,16 @@ def login(b: Login, resp: Response):
 def logout(resp: Response):
     resp.delete_cookie("pm_auth"); return {"ok": True}
 
-def srow(r): return {"id": r[0], "day": r[1].isoformat(), "seconds": r[2], "project": r[3], "note": r[4], "pomodoro": r[5]}
+def hhmm(t): return t.astimezone(TZ).strftime("%H:%M")
+def srow(r):
+    return {"id": r[0], "day": r[1].isoformat(), "seconds": r[2], "project": r[3], "note": r[4], "pomodoro": r[5],
+            "start": hhmm(r[6] - datetime.timedelta(seconds=r[2])) if r[6] else None, "end": hhmm(r[6]) if r[6] else None}
 def get_settings(c): return {k: int(v) for k, v in c.execute("SELECT key,value FROM settings").fetchall()}
 
 @app.get("/api/state")
 def state(req: Request):
     with pool.connection() as c:
-        rows = c.execute("SELECT id,day,seconds,project,note,pomodoro FROM sessions ORDER BY day DESC, id DESC").fetchall()
+        rows = c.execute("SELECT id,day,seconds,project,note,pomodoro,ended_at FROM sessions ORDER BY day DESC, ended_at DESC NULLS LAST, id DESC").fetchall()
         projects = [{"name": r[0], "color": r[1]} for r in c.execute("SELECT name,color FROM projects ORDER BY position").fetchall()]
         st = get_settings(c)
     return {"edit": authed(req), "sessions": [srow(r) for r in rows], "projects": projects, "settings": st, "today": today().isoformat()}
@@ -157,7 +161,7 @@ def move_on(c, log_seconds, end_ms):
     phase, project, note, cycle = r
     if phase == "focus" and log_seconds > 0:
         day = datetime.datetime.fromtimestamp(end_ms / 1000, TZ).date()
-        c.execute("INSERT INTO sessions(day,seconds,project,note,pomodoro) VALUES (%s,%s,%s,%s,true)", (day, min(86400, log_seconds), project, note))
+        c.execute("INSERT INTO sessions(day,seconds,project,note,pomodoro,ended_at) VALUES (%s,%s,%s,%s,true,to_timestamp(%s))", (day, min(86400, log_seconds), project, note, end_ms / 1000))
     nxt, cycle = next_phase(c, phase, cycle) if (phase != "focus" or log_seconds > 0) else (phase, cycle)
     c.execute("UPDATE timer SET phase=%s,dur_ms=%s,acc_ms=0,start_ms=0,cycle=%s,day=NULL WHERE id=1", (nxt, phase_ms(get_settings(c), nxt), cycle))
 

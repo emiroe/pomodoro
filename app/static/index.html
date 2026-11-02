@@ -150,7 +150,7 @@ function render(){
  let l='',lastD='';const dayTot=by;
  for(const s of S.sessions.slice(0,200)){
   if(s.day!=lastD){lastD=s.day;l+=`<div class="day">${fromIso(s.day).toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short',year:'numeric'})}<span>${fmt(dayTot[s.day])}</span></div>`}
-  l+=`<div class="sess"><i class="dot" style="background:${pcolor(s.project)}"></i><div class="m">${s.pomodoro?'🍅 ':''}${esc(s.project||'No project')}${s.note?`<small>${esc(s.note)}</small>`:''}</div><div class="d">${fmt(s.seconds)}</div>${S.edit?`<button class="btn sm" data-x="${s.id}">✕</button>`:''}</div>`}
+  l+=`<div class="sess"><i class="dot" style="background:${pcolor(s.project)}"></i><div class="m">${esc(s.project||'No project')}${s.start?`<small>${s.start}–${s.end}${s.note?' · '+esc(s.note):''}</small>`:s.note?`<small>${esc(s.note)}</small>`:''}</div><div class="d">${fmt(s.seconds)}</div>${S.edit?`<button class="btn sm" data-x="${s.id}">✕</button>`:''}</div>`}
  $('list').innerHTML=l||'<div style="color:var(--dim)">No sessions yet.</div>';
  if(S.edit){projOptions($('tproj'),T?T.project:'');renderSettings()}
 }

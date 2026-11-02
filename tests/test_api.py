@@ -49,6 +49,7 @@ def test_timer(c):
             t = c.post("/api/timer/skip").json()["timer"]; assert t["phase"] == "focus"
         ss = c.get("/api/state").json()["sessions"]
         assert len(ss) == n0 + 2 and ss[0]["pomodoro"] and ss[0]["project"] == "Deep" and ss[0]["seconds"] == 60
+        assert len(ss[0]["end"]) == 5 and ss[0]["start"] != ss[0]["end"] and ss[1]["end"] <= ss[0]["end"] or ss[1]["day"] != ss[0]["day"]   # clock times HH:MM, newest first
         c.post("/api/timer/start", json={"project": "Auto"})                          # the server ticker closes a due block by itself
         with main.pool.connection() as db: db.execute("UPDATE timer SET start_ms=%s, acc_ms=0 WHERE id=1", (main.now_ms() - 61000,))
         main.tick()
