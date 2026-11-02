@@ -19,7 +19,7 @@ h2{font-size:13px;margin:0 0 8px;color:var(--dim);text-transform:uppercase;lette
 .btn{border:1px solid var(--line);background:var(--card2);color:var(--txt);font:inherit;font-weight:600;padding:8px 16px;border-radius:999px;cursor:pointer;white-space:nowrap}
 .btn.pri{background:var(--accent);border-color:var(--accent);color:#fff}.btn.sm{padding:4px 10px;font-size:13px}
 .btn.ico{width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;font-size:17px}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
+.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}@media(min-width:560px){.stats{grid-template-columns:repeat(4,1fr)}}@media(min-width:780px){.stats{grid-template-columns:repeat(6,1fr)}}   /* 12 tiles: always full rows */
 .stat{background:var(--card2);border-radius:12px;padding:10px 12px}
 .stat b{display:block;font-size:21px;font-variant-numeric:tabular-nums}.stat span{color:var(--dim);font-size:12px}
 .bar{height:10px;background:var(--card2);border-radius:99px;overflow:hidden;display:flex;margin:8px 0 4px}.bar i{display:block;height:100%}
@@ -126,8 +126,10 @@ function render(){
  const t0=fromIso(today),wk=new Date(t0);wk.setDate(wk.getDate()-((wk.getDay()+6)%7));
  let week=0,month=0;for(const[d,v]of Object.entries(by)){const x=fromIso(d);if(x>=wk)week+=v;if(x.getFullYear()==t0.getFullYear()&&x.getMonth()==t0.getMonth())month+=v}
  const days=Object.keys(by).sort(),first=days.length?fromIso(days[0]):t0,span=Math.max(1,Math.round((t0-first)/864e5)+1);
- const{cur,best}=streaks(by,t0,first);
- $('stats').innerHTML=[['Total',fmtm(total)],['This week',fmtm(week)],['This month',fmtm(month)],['Avg per day',fmtm(total/span)],['Pomodoros',pomos],['Streak',cur],['Longest streak',best]]
+ const{cur,best:bestStreak}=streaks(by,t0,first);
+ const nAct=days.length,best=Math.max(0,...Object.values(by)),nPom=Object.keys(focusBy).length;
+ $('stats').innerHTML=[['Today',fmtm(td)],['This week',fmtm(week)],['This month',fmtm(month)],['Total',fmtm(total)],['Avg per day',fmtm(total/span)],['Avg per work day',fmtm(nAct?total/nAct:0)],
+  ['Best day',fmtm(best)],['Days worked',nAct],['Pomodoros',pomos],['Pomodoros / day',nPom?(pomos/nPom).toFixed(1):'0'],['Streak',cur],['Longest streak',bestStreak]]
   .map(([k,v])=>`<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('');
  // heat map: 10 steps like the Chinese tracker: thresholds .125 .25 .5 .75 1 1.25 1.5 2 4 x the average per ACTIVE day (all history)
  const avgL=days.length?total/days.length:0,TH=[.125,.25,.5,.75,1,1.25,1.5,2,4].map(x=>x*avgL);
