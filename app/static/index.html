@@ -101,7 +101,8 @@ form .row>*{flex:1 1 120px}
 <div class="card hide" id="setCard"><h2>Settings</h2>
 <div class="set" id="setForm"></div><div id="pjList"></div>
 <div class="pj"><input type="text" id="npName" placeholder="New activity" maxlength="60"><input type="color" id="npColor" value="#7c9cff"><button class="btn sm" id="npAdd">Add</button></div>
-<div class="row" style="margin-top:12px"><a class="btn sm" href="/api/export.csv" style="text-decoration:none">Export CSV</a><button class="btn sm" id="pwBtn">Change password</button><button class="btn sm" id="mbBtn">Mac menu bar plugin</button></div>
+<div class="row" style="margin-top:12px"><a class="btn sm" href="/api/export.csv" style="text-decoration:none">Export CSV</a><button class="btn sm" id="pwBtn">Change password</button><button class="btn sm" id="mbBtn">Mac menu bar plugin</button><button class="btn sm" id="apiBtn">To-do API</button></div>
+<div id="apiHelp" class="hide" style="margin-top:10px;font-size:13px;color:var(--dim);line-height:1.5"></div>
 <div id="mbHelp" class="hide" style="margin-top:10px;font-size:13px;color:var(--dim);line-height:1.5"></div>
 <form id="pwForm" class="hide" autocomplete="off" style="margin-top:10px"><div class="row"><input type="password" id="pwCur" placeholder="Current password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" required>
 <input type="password" id="pwNew" placeholder="New password (8+ characters)" autocomplete="new-password" autocapitalize="off" autocorrect="off" spellcheck="false" minlength="8" required>
@@ -263,6 +264,17 @@ $('pwForm').onsubmit=async e=>{e.preventDefault();if($('pwNew').value!==$('pwNew
 $('mbBtn').onclick=async()=>{if(!confirm('Download the menu bar plugin? This makes a new key and switches off any plugin you installed before.'))return;
  try{const r=await fetch('/api/menubar/key',{method:'POST'});if(!r.ok)throw new Error('failed');const a=document.createElement('a');a.href=URL.createObjectURL(await r.blob());a.download='pomodoro.1s.sh';a.click();
   $('mbHelp').classList.remove('hide');$('mbHelp').innerHTML='<b style="color:var(--txt)">Install on your Mac</b><br>1. Install SwiftBar (free): <code>brew install --cask swiftbar</code> or from swiftbar.app, and pick a plugin folder when it asks.<br>2. Move <code>pomodoro.1s.sh</code> from Downloads into that folder.<br>3. In Terminal: <code>chmod +x &lt;plugin folder&gt;/pomodoro.1s.sh</code><br>The timer then shows in the menu bar, with your to-do list in its menu. Both keep working offline and sync when the site is reachable again. The file holds a key that can only control the timer: do not share it. Downloading again replaces the key.'}catch(e){toast(e.message)}};
+function renderApi(tok){const o=location.origin,T=tok||'YOUR_TOKEN',c='style="word-break:break-all;display:block;background:var(--card2);padding:6px 8px;border-radius:8px;margin:4px 0;color:var(--txt);font-size:12px"';
+ $('apiHelp').classList.remove('hide');
+ $('apiHelp').innerHTML=`<b style="color:var(--txt)">To-do API</b> for scripts and shortcuts. The token can only add, list, change and delete to-dos.<br>
+ ${tok?`<b style="color:var(--txt)">Your new token (shown once, copy it now):</b><input readonly value="${tok}" onclick="this.select()" style="width:100%;margin:6px 0"><br>`:S.api_token?'A token is active. A new one replaces it.<br>':'No token yet.<br>'}
+ <div class="row" style="margin:6px 0"><button class="btn sm" id="apiNew">${S.api_token?'Make a new token':'Create token'}</button>${S.api_token?'<button class="btn sm" id="apiRevoke">Revoke token</button>':''}</div>
+ Add a to-do (status todo|hold|review|finished, prio 0-4):<code ${c}>curl -X POST ${o}/api/v1/todos -H "Authorization: Bearer ${T}" -H "Content-Type: application/json" -d '{"text":"Renew certificate","prio":2}'</code>
+ Simplest form, e.g. for a Shortcut:<code ${c}>curl -X POST -H "Authorization: Bearer ${T}" "${o}/api/v1/todos?text=Buy%20milk"</code>
+ Also: GET /api/v1/todos[?status=todo], PATCH /api/v1/todos/ID {"status":"finished"}, DELETE /api/v1/todos/ID.`;
+ $('apiNew').onclick=async()=>{if(S.api_token&&!confirm('Make a new token? The old one stops working.'))return;try{const r=await api('POST','/api/apitoken');S.api_token=true;renderApi(r.token)}catch(e){toast(e.message)}};
+ if($('apiRevoke'))$('apiRevoke').onclick=async()=>{if(!confirm('Revoke the token? Anything using it stops working.'))return;try{await api('DELETE','/api/apitoken');S.api_token=false;renderApi(null)}catch(e){toast(e.message)}}}
+$('apiBtn').onclick=()=>{if($('apiHelp').classList.contains('hide'))renderApi(null);else $('apiHelp').classList.add('hide')};
 $('gear').onclick=()=>$('setCard').classList.toggle('hide');
 $('setForm').onchange=async e=>{const k=e.target.dataset.k;if(!k)return;try{await api('POST','/api/settings',{[k]:+e.target.value});toast('Saved');if(T&&!T.start&&!T.acc&&k.endsWith('_min'))await tcall('DELETE','/api/timer');await load()}catch(er){toast(er.message);await load()}};
 $('npAdd').onclick=async()=>{const n=$('npName').value.trim();if(!n)return;await api('POST','/api/project',{name:n,color:$('npColor').value});$('npName').value='';await load()};

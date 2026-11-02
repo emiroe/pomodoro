@@ -72,6 +72,14 @@ def authed(req: Request):
     return hmac.compare_digest(sig, sign(ts)) and time.time() - int(ts) < 90 * 86400
 def need_auth(req):
     if not authed(req): raise HTTPException(401, "login required")
+def need_todo_api(req):
+    # /api/v1/todos* accepts the logged-in session OR the to-do API token ('Authorization: Bearer <token>' or 'X-API-Key'); the token reaches nothing else
+    if authed(req): return
+    h = req.headers.get("authorization", "")
+    tok = h[7:].strip() if h.lower().startswith("bearer ") else req.headers.get("x-api-key", "")
+    with pool.connection() as c: r = c.execute("SELECT value FROM settings WHERE key='api_token_hash'").fetchone()
+    if tok and r and hmac.compare_digest(hashlib.sha256(tok.encode()).hexdigest(), r[0]): return
+    raise HTTPException(401, "missing or wrong API token")
 def need_timer(req):
     # the timer endpoints also accept the menu bar plugin's key (header X-Timer-Key); it can do nothing else (no sessions, no settings, no Reset Day)
     if authed(req): return
@@ -130,7 +138,8 @@ def state(req: Request):
         projects = [{"name": r[0], "color": r[1]} for r in c.execute("SELECT name,color FROM projects ORDER BY position").fetchall()]
         st = get_settings(c)
         todos = todo_list(c) if authed(req) else []      # the to-do list is private: only shown when logged in
-    return {"edit": authed(req), "sessions": [srow(r) for r in rows], "projects": projects, "settings": st, "today": today().isoformat(), "todos": todos}
+        api_hash = c.execute("SELECT 1 FROM settings WHERE key='api_token_hash'").fetchone()
+    return {"edit": authed(req), "sessions": [srow(r) for r in rows], "projects": projects, "settings": st, "today": today().isoformat(), "todos": todos, "api_token": authed(req) and bool(api_hash)}
 
 TODO_STATUS = ("todo", "hold", "review", "finished")
 
@@ -185,6 +194,68 @@ def todo_clear_done(req: Request):
     need_auth(req)   # clears the Finished tab
     with pool.connection() as c:
         c.execute("DELETE FROM todos WHERE status='finished'"); return {"todos": todo_list(c)}
+
+# ---- to-do API for scripts / shortcuts (token made in Settings; see README)
+class TodoIn(BaseModel): text: str; status: str = "todo"; prio: int = 0
+class TodoPatch(BaseModel): text: str | None = None; status: str | None = None; prio: int | None = None
+
+def todo_item(c, tid):
+    r = c.execute("SELECT id,text,status,coalesce(prio,0) FROM todos WHERE id=%s", (tid,)).fetchone()
+    return {"id": r[0], "text": r[1], "status": r[2], "prio": r[3]} if r else None
+
+@app.post("/api/apitoken")
+def api_token_make(req: Request):
+    need_auth(req)   # only from a logged-in session; a new token replaces (revokes) the old one; the token is shown ONCE
+    tok = "pm_" + secrets.token_urlsafe(32)
+    with pool.connection() as c:
+        c.execute("INSERT INTO settings VALUES ('api_token_hash',%s) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", (hashlib.sha256(tok.encode()).hexdigest(),))
+    return {"token": tok}
+
+@app.delete("/api/apitoken")
+def api_token_revoke(req: Request):
+    need_auth(req)
+    with pool.connection() as c: c.execute("DELETE FROM settings WHERE key='api_token_hash'")
+    return {"ok": True}
+
+@app.post("/api/v1/todos", status_code=201)
+def v1_add(req: Request, b: TodoIn | None = None, text: str | None = None, status: str = "todo", prio: int = 0):
+    # JSON body {"text": "...", "status": "todo|hold|review|finished", "prio": 0-4}, or just ?text=... for the simplest shortcuts
+    need_todo_api(req)
+    t = ((b.text if b else text) or "").strip()[:200]; st = b.status if b else status; pr = b.prio if b else prio
+    if not t: raise HTTPException(400, "text is required")
+    if st not in TODO_STATUS: raise HTTPException(400, "status must be one of " + ", ".join(TODO_STATUS))
+    if not 0 <= pr <= 4: raise HTTPException(400, "prio must be 0 (none) to 4")
+    with pool.connection() as c:
+        tid = c.execute("INSERT INTO todos(text,status,done,prio,position) VALUES (%s,%s,%s,%s,(SELECT coalesce(max(position),0)+1 FROM todos)) RETURNING id", (t, st, st == "finished", pr or None)).fetchone()[0]
+        return todo_item(c, tid)
+
+@app.get("/api/v1/todos")
+def v1_list(req: Request, status: str | None = None):
+    need_todo_api(req)
+    if status is not None and status not in TODO_STATUS: raise HTTPException(400, "status must be one of " + ", ".join(TODO_STATUS))
+    with pool.connection() as c:
+        rows = c.execute("SELECT id,text,status,coalesce(prio,0) FROM todos WHERE (%s::text IS NULL OR status=%s) ORDER BY (status='finished'), coalesce(prio,5), position, id", (status, status)).fetchall()
+    return [{"id": r[0], "text": r[1], "status": r[2], "prio": r[3]} for r in rows]
+
+@app.patch("/api/v1/todos/{tid}")
+def v1_patch(tid: int, b: TodoPatch, req: Request):
+    need_todo_api(req)
+    if b.status is not None and b.status not in TODO_STATUS: raise HTTPException(400, "bad status")
+    if b.prio is not None and not 0 <= b.prio <= 4: raise HTTPException(400, "bad prio")
+    with pool.connection() as c:
+        if todo_item(c, tid) is None: raise HTTPException(404, "no such to-do")
+        if b.status is not None: c.execute("UPDATE todos SET status=%s, done=%s, status_at=now() WHERE id=%s AND status<>%s", (b.status, b.status == "finished", tid, b.status))
+        if b.prio is not None: c.execute("UPDATE todos SET prio=%s WHERE id=%s", (b.prio or None, tid))
+        if b.text is not None and b.text.strip(): c.execute("UPDATE todos SET text=%s WHERE id=%s", (b.text.strip()[:200], tid))
+        return todo_item(c, tid)
+
+@app.delete("/api/v1/todos/{tid}")
+def v1_delete(tid: int, req: Request):
+    need_todo_api(req)
+    with pool.connection() as c:
+        if todo_item(c, tid) is None: raise HTTPException(404, "no such to-do")
+        c.execute("DELETE FROM todos WHERE id=%s", (tid,))
+    return {"ok": True}
 
 def check(b: Session):
     try: datetime.date.fromisoformat(b.day)

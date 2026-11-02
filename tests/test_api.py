@@ -205,3 +205,31 @@ def test_todo_sync_from_plugin(c):
     assert {t["id"]: t["status"] for t in c.get("/api/state").json()["todos"]}[a] == "todo"
     assert anon.get("/api/state", headers=h).json()["todos"] == []                       # the key does not read the list through the normal API
     for t in c.get("/api/state").json()["todos"]: c.delete(f"/api/todo/{t['id']}")
+
+def test_todo_api_token(c):
+    from fastapi.testclient import TestClient as TC
+    anon = TC(main.app, base_url="https://testserver")
+    assert anon.post("/api/apitoken").status_code == 401 and anon.post("/api/v1/todos", json={"text": "x"}).status_code == 401
+    c.post("/api/login", json={"password": os.environ["EDIT_PASSWORD"]})
+    tok = c.post("/api/apitoken").json()["token"]; h = {"Authorization": "Bearer " + tok}
+    assert c.get("/api/state").json()["api_token"] is True and anon.get("/api/state").json()["api_token"] is False
+    assert anon.post("/api/v1/todos", headers={"Authorization": "Bearer nope"}, json={"text": "x"}).status_code == 401
+    r = anon.post("/api/v1/todos", headers=h, json={"text": "Renew certificate", "prio": 2}); assert r.status_code == 201
+    item = r.json(); assert item["text"] == "Renew certificate" and item["status"] == "todo" and item["prio"] == 2
+    q = anon.post("/api/v1/todos?text=Buy%20milk", headers={"X-API-Key": tok}); assert q.status_code == 201 and q.json()["text"] == "Buy milk"      # query form + X-API-Key
+    assert anon.post("/api/v1/todos", headers=h, json={"text": "  "}).status_code == 400
+    assert anon.post("/api/v1/todos", headers=h, json={"text": "x", "status": "nope"}).status_code == 400
+    assert anon.post("/api/v1/todos", headers=h, json={"text": "x", "prio": 9}).status_code == 400
+    assert anon.patch(f"/api/v1/todos/{item['id']}", headers=h, json={"status": "review", "prio": 1}).json()["status"] == "review"
+    assert [t["text"] for t in anon.get("/api/v1/todos?status=review", headers=h).json()] == ["Renew certificate"]
+    assert anon.get("/api/v1/todos?status=bad", headers=h).status_code == 400 and anon.patch("/api/v1/todos/999999", headers=h, json={"prio": 1}).status_code == 404
+    assert "Renew certificate" in [t["text"] for t in c.get("/api/state").json()["todos"]]                       # same data the web page shows
+    # the token reaches nothing else
+    for call in (anon.get("/api/timer", headers=h), anon.post("/api/session", headers=h, json={"day": "2026-11-02", "seconds": 60}), anon.post("/api/todo", headers=h, json={"text": "x"}),
+                 anon.post("/api/menubar/key", headers=h), anon.get("/api/export.csv", headers=h)): assert call.status_code == 401
+    assert anon.get("/api/state", headers=h).json()["todos"] == []
+    tok2 = c.post("/api/apitoken").json()["token"]
+    assert anon.get("/api/v1/todos", headers=h).status_code == 401 and anon.get("/api/v1/todos", headers={"Authorization": "Bearer " + tok2}).status_code == 200   # new token revokes the old
+    assert anon.delete(f"/api/v1/todos/{item['id']}", headers={"Authorization": "Bearer " + tok2}).status_code == 200
+    assert c.delete("/api/apitoken").status_code == 200 and anon.get("/api/v1/todos", headers={"Authorization": "Bearer " + tok2}).status_code == 401
+    for t in c.get("/api/state").json()["todos"]: c.delete(f"/api/todo/{t['id']}")
