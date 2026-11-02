@@ -76,7 +76,7 @@ form .row>*{flex:1 1 120px}
 <div class="tside"><div class="dots" id="dots"></div>
 <select id="tproj"></select><input id="tnote" placeholder="What are you working on?" maxlength="300" enterkeyhint="done">
 <button class="big" id="go">▶ Start</button>
-<div class="tsub"><button class="btn" id="fin">Log now</button><button class="btn" id="skip">Skip</button><button class="btn" id="reset" title="Back to the start">Reset</button></div></div></div></div>
+<div class="tsub"><button class="btn" id="fin">Log now</button><button class="btn" id="skip">Skip</button><button class="btn" id="reset" title="Back to the first pomodoro of the day">Reset Day</button></div></div></div></div>
 
 <div class="card"><h2>Today <span id="goalTxt"></span></h2><div class="bar" id="goalBar"></div><div id="todayTxt" style="color:var(--dim);font-size:13px"></div></div>
 <div class="card"><div class="stats" id="stats"></div></div>
@@ -174,7 +174,7 @@ function renderTimer(){
  $('go').textContent=running?'❚❚ Pause':(T.acc>0?'▶ Resume':'▶ Start');$('go').classList.toggle('pause',running);
  const every=S.settings.long_every;$('dots').innerHTML=Array.from({length:every},(_,i)=>`<i class="${i<T.cycle%every||(T.cycle>0&&T.cycle%every==0&&T.phase=='long')?'d':''}"></i>`).join('');
  const done=T.phase=='focus'?(T.acc+(T.start?Date.now()+offset-T.start:0))/1000:0;
- $('fin').classList.toggle('hide',!(T.phase=='focus'&&done>=60));$('skip').textContent=brk?'Skip break':'Reset block';
+ $('fin').classList.toggle('hide',!(T.phase=='focus'&&done>=60));$('skip').textContent=brk?'Skip break':'Reset Pomodoro';
  document.title=(running||T.acc>0?$('clock').textContent+' · ':'')+(brk?'Break':'Focus');
  if(running&&rem<=0&&!completing)complete()}
 async function complete(){completing=true;const was=T.phase;try{const r=await api('POST','/api/timer/complete');T=r.timer;offset=r.now-Date.now();ping(was);S=await api('GET','/api/state');render()}catch(e){toast(e.message)}completing=false;renderTimer()}
@@ -188,8 +188,8 @@ async function tcall(m,u,b){try{const r=await api(m,u,b);T=r.timer||T;offset=(r.
 $('go').onclick=async()=>{if(window.Notification&&Notification.permission=='default')Notification.requestPermission();
  if(T.start)await tcall('POST','/api/timer/pause');else await tcall('POST','/api/timer/start',label())};
 $('fin').onclick=async()=>{if(await tcall('POST','/api/timer/finish')){S=await api('GET','/api/state');render();toast('Logged')}};
-$('skip').onclick=async()=>{if(T.phase=='focus'&&(T.acc||T.start)&&!confirm('Drop this block without logging it?'))return;await tcall('POST','/api/timer/skip')};
-$('reset').onclick=async()=>{if(confirm('Reset the timer to the first focus block?'))await tcall('DELETE','/api/timer')};
+$('skip').onclick=async()=>{if(T.phase=='focus'&&(T.acc||T.start)&&!confirm('Restart this pomodoro? The time so far is not logged.'))return;await tcall('POST','/api/timer/skip')};
+$('reset').onclick=async()=>{if(!confirm('Reset the day? Time done on the current block is logged, then the timer starts again at pomodoro 1.'))return;const r=await tcall('DELETE','/api/timer');if(r){S=await api('GET','/api/state');render();if(r.logged)toast('Logged '+fmt(r.logged)+' on '+S.sessions[0].day);}};
 $('tproj').onchange=async()=>{if($('tproj').value=='__new'){const n=(prompt('Project name')||'').trim();if(n){await api('POST','/api/project',{name:n,color:'#7c9cff'});S=await api('GET','/api/state');render();$('tproj').value=n}else $('tproj').value=T.project}
  await tcall('POST','/api/timer/label',label())};
 $('tnote').onchange=()=>tcall('POST','/api/timer/label',label());

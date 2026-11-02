@@ -58,3 +58,11 @@ def test_timer(c):
         with main.pool.connection() as db: db.execute("UPDATE timer SET acc_ms=90000, start_ms=0 WHERE id=1")   # paused after 90 s
         assert c.post("/api/timer/finish").json()["timer"]["phase"] in ("short", "long")
         c.post("/api/settings", json={"focus_min": 25, "long_every": 4})
+        # Reset Day logs the unfinished focus block under the day it was started, then resets everything
+        c.post("/api/timer/skip"); c.delete("/api/timer"); c.post("/api/timer/start", json={"project": "Late", "note": "half"})
+        with main.pool.connection() as db: db.execute("UPDATE timer SET acc_ms=125000, start_ms=0, day='2026-11-01' WHERE id=1")
+        r = c.delete("/api/timer").json()
+        assert r["logged"] == 125 and r["timer"]["cycle"] == 0 and r["timer"]["phase"] == "focus" and r["timer"]["acc"] == 0
+        row = [x for x in c.get("/api/state").json()["sessions"] if x["project"] == "Late"][0]
+        assert row["day"] == "2026-11-01" and row["seconds"] == 125 and row["note"] == "half" and row["pomodoro"] is False
+        assert c.delete("/api/timer").json()["logged"] == 0

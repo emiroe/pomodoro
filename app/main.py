@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS settings (key text PRIMARY KEY, value text NOT NULL);
 INSERT INTO settings VALUES ('focus_min','25'),('short_min','5'),('long_min','15'),('long_every','4'),('daily_goal','8') ON CONFLICT DO NOTHING;
 CREATE TABLE IF NOT EXISTS timer (id int PRIMARY KEY DEFAULT 1 CHECK (id = 1), phase text NOT NULL DEFAULT 'focus', dur_ms bigint NOT NULL,
   acc_ms bigint NOT NULL DEFAULT 0, start_ms bigint NOT NULL DEFAULT 0, project text NOT NULL DEFAULT '', note text NOT NULL DEFAULT '', cycle int NOT NULL DEFAULT 0);
+ALTER TABLE timer ADD COLUMN IF NOT EXISTS day date;
 """
 LIMITS = {"focus_min": (1, 180), "short_min": (1, 60), "long_min": (1, 120), "long_every": (2, 12), "daily_goal": (1, 40)}
 
@@ -158,7 +159,7 @@ def move_on(c, log_seconds, end_ms):
         day = datetime.datetime.fromtimestamp(end_ms / 1000, TZ).date()
         c.execute("INSERT INTO sessions(day,seconds,project,note,pomodoro) VALUES (%s,%s,%s,%s,true)", (day, min(86400, log_seconds), project, note))
     nxt, cycle = next_phase(c, phase, cycle) if (phase != "focus" or log_seconds > 0) else (phase, cycle)
-    c.execute("UPDATE timer SET phase=%s,dur_ms=%s,acc_ms=0,start_ms=0,cycle=%s WHERE id=1", (nxt, phase_ms(get_settings(c), nxt), cycle))
+    c.execute("UPDATE timer SET phase=%s,dur_ms=%s,acc_ms=0,start_ms=0,cycle=%s,day=NULL WHERE id=1", (nxt, phase_ms(get_settings(c), nxt), cycle))
 
 class TimerStart(BaseModel): project: str | None = None; note: str | None = None
 @app.get("/api/timer")
@@ -172,7 +173,7 @@ def timer_start(b: TimerStart, req: Request):
     with pool.connection() as c:
         timer_state(c)
         if b.project is not None: c.execute("UPDATE timer SET project=%s,note=%s WHERE id=1", (ensure_project(c, b.project), (b.note or "")[:300]))
-        c.execute("UPDATE timer SET start_ms=%s WHERE id=1 AND start_ms=0", (now_ms(),))
+        c.execute("UPDATE timer SET start_ms=%s, day=COALESCE(day,%s) WHERE id=1 AND start_ms=0", (now_ms(), today()))
         return timer_state(c)
 
 @app.post("/api/timer/pause")
@@ -233,16 +234,25 @@ def timer_skip(req: Request):
     with pool.connection() as c:
         s = timer_state(c)["timer"]
         if s["phase"] == "focus":
-            c.execute("UPDATE timer SET acc_ms=0,start_ms=0 WHERE id=1")
+            c.execute("UPDATE timer SET acc_ms=0,start_ms=0,day=NULL WHERE id=1")
         else: move_on(c, 0, now_ms())
         return timer_state(c)
 
 @app.delete("/api/timer")
 def timer_reset(req: Request):
+    # 'Reset Day': time already done on an unfinished focus block (>= 1 min) is logged first, under the day the block was started
+    # (so a reset the next morning books it on the previous day), with the timer's project and note; it is time, not a pomodoro.
     need_auth(req)
     with pool.connection() as c:
+        logged = 0
+        r = c.execute("SELECT phase,acc_ms,start_ms,project,note,day FROM timer WHERE id=1").fetchone()
+        if r is not None and r[0] == "focus":
+            el = r[1] + (now_ms() - r[2] if r[2] else 0)
+            if el >= 60000:
+                logged = min(86400, el // 1000)
+                c.execute("INSERT INTO sessions(day,seconds,project,note,pomodoro) VALUES (%s,%s,%s,%s,false)", (r[5] or today(), logged, r[3], r[4]))
         c.execute("DELETE FROM timer WHERE id=1")
-        return timer_state(c)
+        return dict(timer_state(c), logged=logged)
 
 @app.get("/api/export.csv")
 def export(req: Request):
