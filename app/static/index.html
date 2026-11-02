@@ -50,11 +50,11 @@ form .row>*{flex:1 1 120px}
 .hm .cols{display:grid;grid-auto-flow:column;grid-auto-columns:12px;grid-template-rows:14px repeat(7,12px);gap:3px;margin-right:6px;padding:2px 0}
 .hm .mo{font-size:10px;color:var(--dim);white-space:nowrap;overflow:visible;line-height:14px;display:flex;justify-content:center;width:12px}
 .hm .c{width:12px;height:12px;border-radius:3px;background:var(--card2)}.hm .c.n{background:none}
-.hm .c.l1{background:color-mix(in srgb,var(--ok) 30%,var(--card2))}.hm .c.l2{background:color-mix(in srgb,var(--ok) 55%,var(--card2))}.hm .c.l3{background:color-mix(in srgb,var(--ok) 80%,var(--card2))}.hm .c.l4{background:var(--ok)}
+.hm,.hl{--h1:#d8ec84;--h2:#c2e070;--h3:#aad45f;--h4:#92c850;--h5:#7ab943;--h6:#62a838;--h7:#4c962f;--h8:#388427;--h9:#2a731f;--h10:#1f6318}
+.hm .c.l1,.hl .c.l1{background:var(--h1)}.hm .c.l2,.hl .c.l2{background:var(--h2)}.hm .c.l3,.hl .c.l3{background:var(--h3)}.hm .c.l4,.hl .c.l4{background:var(--h4)}.hm .c.l5,.hl .c.l5{background:var(--h5)}.hm .c.l6,.hl .c.l6{background:var(--h6)}.hm .c.l7,.hl .c.l7{background:var(--h7)}.hm .c.l8,.hl .c.l8{background:var(--h8)}.hm .c.l9,.hl .c.l9{background:var(--h9)}.hm .c.l10,.hl .c.l10{background:var(--h10)}
 .hm .c.t{outline:1.5px solid var(--accent)}
 .hl{display:flex;align-items:center;justify-content:flex-end;gap:4px;color:var(--dim);font-size:11px;margin-top:6px}
 .hl .c{width:11px;height:11px;border-radius:3px;display:inline-block;background:var(--card2)}
-.hl .c.l1{background:color-mix(in srgb,var(--ok) 30%,var(--card2))}.hl .c.l2{background:color-mix(in srgb,var(--ok) 55%,var(--card2))}.hl .c.l3{background:color-mix(in srgb,var(--ok) 80%,var(--card2))}.hl .c.l4{background:var(--ok)}
 .pr{display:flex;align-items:center;gap:8px;margin:7px 0;font-size:13px}.pr .n{width:34%;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:6px}
 .pr .bar{flex:1;margin:0}.pr .v{width:64px;text-align:right;color:var(--dim);font-variant-numeric:tabular-nums}
 .dot{width:10px;height:10px;border-radius:3px;flex:none;display:inline-block}
@@ -81,7 +81,7 @@ form .row>*{flex:1 1 120px}
 <div class="card"><h2>Today <span id="goalTxt"></span></h2><div class="bar" id="goalBar"></div><div id="todayTxt" style="color:var(--dim);font-size:13px"></div></div>
 <div class="card"><div class="stats" id="stats"></div></div>
 <div class="card"><h2>Last 12 months <span style="text-transform:none;letter-spacing:0" id="hmTxt"></span></h2><div class="hm" id="hm"></div>
-<div class="hl">less <span class="c"></span><span class="c l1"></span><span class="c l2"></span><span class="c l3"></span><span class="c l4"></span> more (goal = full)</div></div>
+<div class="hl">less <span class="c"></span><span class="c l1"></span><span class="c l2"></span><span class="c l3"></span><span class="c l4"></span><span class="c l5"></span><span class="c l6"></span><span class="c l7"></span><span class="c l8"></span><span class="c l9"></span><span class="c l10"></span> more</div></div>
 <div class="card"><h2>By project <span class="seg" id="range"><button data-r="7">Week</button><button data-r="30" class="on">Month</button><button data-r="0">All</button></span></h2><div id="byProj"></div></div>
 
 <div class="card hide" id="setCard"><h2>Settings</h2>
@@ -136,14 +136,15 @@ function render(){
  {let x=new Date(t0);if(!by[iso(x)])x.setDate(x.getDate()-1);while(by[iso(x)]){cur++;x.setDate(x.getDate()-1)}}
  $('stats').innerHTML=[['Total',fmtm(total)],['This week',fmtm(week)],['This month',fmtm(month)],['Avg per day',fmtm(total/span)],['Pomodoros',pomos],['Streak',cur],['Longest streak',best]]
   .map(([k,v])=>`<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('');
- // heat map: 53 weeks ending this week
+ // heat map: 10 steps like the Chinese tracker: thresholds .125 .25 .5 .75 1 1.25 1.5 2 4 x the average per ACTIVE day (all history)
+ const avgL=days.length?total/days.length:0,TH=[.125,.25,.5,.75,1,1.25,1.5,2,4].map(x=>x*avgL);
  const start=new Date(t0);start.setDate(start.getDate()-((start.getDay()+6)%7)-52*7);
  let h='<div class="wd"><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span><span></span><span></span></div><div class="cols">',lastM=-1;
  for(let w=0;w<53;w++){const ws=new Date(start);ws.setDate(ws.getDate()+w*7);const m=ws.getMonth();
   h+=`<div class="mo">${m!=lastM?ws.toLocaleString('en',{month:'short'}):''}</div>`;if(m!=lastM)lastM=m;
   for(let d=0;d<7;d++){const x=new Date(ws);x.setDate(x.getDate()+d);const k=iso(x);
    if(x>t0){h+='<div class="c n"></div>';continue}
-   const v=by[k]||0,l=!v?0:v<goalSec*.34?1:v<goalSec*.67?2:v<goalSec?3:4;
+   const v=by[k]||0,l=!v?0:1+TH.filter(t=>v>=t).length;
    h+=`<div class="c${l?' l'+l:''}${k==today?' t':''}" title="${k}: ${fmtm(v)}"></div>`}}
  $('hm').innerHTML=h+'</div>';$('hm').scrollLeft=1e5;
  const act=Object.keys(by).filter(d=>fromIso(d)>=start).length;$('hmTxt').textContent=`${act} days`;
