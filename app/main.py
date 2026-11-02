@@ -38,7 +38,23 @@ async def lifespan(app):
 
 app = FastAPI(lifespan=lifespan)
 
-def sign(ts): return hmac.new(SECRET, str(ts).encode(), hashlib.sha256).hexdigest()
+# Password: starts as EDIT_PASSWORD from .env; once changed in the app a scrypt hash lives in settings.pw_hash and wins.
+# settings.pw_ver is mixed into the cookie signature, so changing the password signs every other device out.
+# Forgot it? DELETE FROM settings WHERE key IN ('pw_hash','pw_ver')  -> the .env password works again.
+def pw_state():
+    with pool.connection() as c: return dict(c.execute("SELECT key,value FROM settings WHERE key IN ('pw_hash','pw_ver')").fetchall())
+def hash_pw(pw, salt=None):
+    salt = salt or os.urandom(16).hex()
+    return salt + "$" + hashlib.scrypt(pw.encode(), salt=salt.encode(), n=2**14, r=8, p=1).hex()
+def pw_ok(pw, st=None):
+    st = pw_state() if st is None else st
+    if "pw_hash" in st:
+        salt, _ = st["pw_hash"].split("$")
+        return hmac.compare_digest(hash_pw(pw, salt), st["pw_hash"])
+    return bool(PASSWORD) and hmac.compare_digest(pw, PASSWORD)
+def sign(ts, ver=None):
+    ver = pw_state().get("pw_ver", "") if ver is None else ver
+    return hmac.new(SECRET + ver.encode(), str(ts).encode(), hashlib.sha256).hexdigest()
 def authed(req: Request):
     try: ts, sig = req.cookies.get("pm_auth", "").split(".")
     except ValueError: return False
@@ -58,9 +74,25 @@ class Settings(BaseModel):
 
 @app.post("/api/login")
 def login(b: Login, resp: Response):
-    if not PASSWORD or not hmac.compare_digest(b.password, PASSWORD): raise HTTPException(403, "wrong password")
+    if not pw_ok(b.password): raise HTTPException(403, "wrong password")
     ts = int(time.time())
     resp.set_cookie("pm_auth", "%d.%s" % (ts, sign(ts)), max_age=90 * 86400, httponly=True, samesite="lax", secure=True)
+    return {"ok": True}
+
+class NewPassword(BaseModel): current: str; new: str
+
+@app.post("/api/password")
+def change_password(b: NewPassword, req: Request, resp: Response):
+    need_auth(req)
+    st = pw_state()
+    if not pw_ok(b.current, st): raise HTTPException(403, "current password is wrong")
+    if len(b.new) < 8: raise HTTPException(400, "new password needs at least 8 characters")
+    ver = str(int(st.get("pw_ver", "0")) + 1)
+    with pool.connection() as c:
+        for k, v in (("pw_hash", hash_pw(b.new)), ("pw_ver", ver)):
+            c.execute("INSERT INTO settings VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", (k, v))
+    ts = int(time.time())   # keep this device signed in, every other one has to log in again
+    resp.set_cookie("pm_auth", "%d.%s" % (ts, sign(ts, ver)), max_age=90 * 86400, httponly=True, samesite="lax", secure=True)
     return {"ok": True}
 
 @app.post("/api/logout")
@@ -71,7 +103,7 @@ def hhmm(t): return t.astimezone(TZ).strftime("%H:%M")
 def srow(r):
     return {"id": r[0], "day": r[1].isoformat(), "seconds": r[2], "project": r[3], "note": r[4], "pomodoro": r[5],
             "start": hhmm(r[6] - datetime.timedelta(seconds=r[2])) if r[6] else None, "end": hhmm(r[6]) if r[6] else None}
-def get_settings(c): return {k: int(v) for k, v in c.execute("SELECT key,value FROM settings").fetchall()}
+def get_settings(c): return {k: int(v) for k, v in c.execute("SELECT key,value FROM settings WHERE key = ANY(%s)", (list(LIMITS),)).fetchall()}
 
 @app.get("/api/state")
 def state(req: Request):

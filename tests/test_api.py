@@ -67,3 +67,19 @@ def test_timer(c):
         row = [x for x in c.get("/api/state").json()["sessions"] if x["project"] == "Late"][0]
         assert row["day"] == "2026-11-01" and row["seconds"] == 125 and row["note"] == "half" and row["pomodoro"] is False
         assert c.delete("/api/timer").json()["logged"] == 0
+
+def test_password(c):
+    pw = os.environ["EDIT_PASSWORD"]
+    c.post("/api/login", json={"password": pw})
+    assert c.post("/api/password", json={"current": "nope", "new": "Another123"}).status_code == 403
+    assert c.post("/api/password", json={"current": pw, "new": "short"}).status_code == 400
+    other = TestClient(main.app, base_url="https://testserver"); assert other.post("/api/login", json={"password": pw}).status_code == 200
+    assert other.get("/api/timer").status_code == 200
+    assert c.post("/api/password", json={"current": pw, "new": "Another123"}).status_code == 200
+    assert c.get("/api/timer").status_code == 200                 # this device stays signed in
+    assert other.get("/api/timer").status_code == 401             # the other device is signed out
+    assert "pw_hash" not in c.get("/api/state").json()["settings"]
+    assert TestClient(main.app, base_url="https://testserver").post("/api/login", json={"password": pw}).status_code == 403
+    assert TestClient(main.app, base_url="https://testserver").post("/api/login", json={"password": "Another123"}).status_code == 200
+    with main.pool.connection() as db: db.execute("DELETE FROM settings WHERE key IN ('pw_hash','pw_ver')")   # recovery path: .env password works again
+    assert TestClient(main.app, base_url="https://testserver").post("/api/login", json={"password": pw}).status_code == 200

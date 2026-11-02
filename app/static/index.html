@@ -87,7 +87,11 @@ form .row>*{flex:1 1 120px}
 <div class="card hide" id="setCard"><h2>Settings</h2>
 <div class="set" id="setForm"></div><div id="pjList"></div>
 <div class="pj"><input type="text" id="npName" placeholder="New project" maxlength="60"><input type="color" id="npColor" value="#7c9cff"><button class="btn sm" id="npAdd">Add</button></div>
-<div class="row" style="margin-top:12px"><a class="btn sm" href="/api/export.csv" style="text-decoration:none">Export CSV</a></div></div>
+<div class="row" style="margin-top:12px"><a class="btn sm" href="/api/export.csv" style="text-decoration:none">Export CSV</a><button class="btn sm" id="pwBtn">Change password</button></div>
+<form id="pwForm" class="hide" autocomplete="off" style="margin-top:10px"><div class="row"><input type="password" id="pwCur" placeholder="Current password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+<input type="password" id="pwNew" placeholder="New password (8+ characters)" autocomplete="new-password" autocapitalize="off" autocorrect="off" spellcheck="false" minlength="8" required>
+<input type="password" id="pwNew2" placeholder="New password again" autocomplete="new-password" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+<button class="btn pri" style="flex:0 0 auto">Save</button></div></form></div>
 
 
 <div class="card"><h2>Sessions</h2><div id="list"></div></div>
@@ -209,6 +213,9 @@ $('tnote').onchange=()=>tcall('POST','/api/timer/label',label());
 $('list').onclick=async e=>{if(e.target.dataset.more){weeks++;return render()}const x=e.target.dataset.x;if(x){if(confirm('Delete this session?')){await api('DELETE','/api/session/'+x);await load()}return}};
 
 // ---- settings
+$('pwBtn').onclick=()=>$('pwForm').classList.toggle('hide');
+$('pwForm').onsubmit=async e=>{e.preventDefault();if($('pwNew').value!==$('pwNew2').value)return toast('The new passwords do not match');
+ try{await api('POST','/api/password',{current:$('pwCur').value,new:$('pwNew').value});$('pwForm').reset();$('pwForm').classList.add('hide');toast('Password changed. Other devices must log in again.')}catch(er){toast(er.message)}};
 $('gear').onclick=()=>$('setCard').classList.toggle('hide');
 $('setForm').onchange=async e=>{const k=e.target.dataset.k;if(!k)return;try{await api('POST','/api/settings',{[k]:+e.target.value});toast('Saved');if(T&&!T.start&&!T.acc&&k.endsWith('_min'))await tcall('DELETE','/api/timer');await load()}catch(er){toast(er.message);await load()}};
 $('npAdd').onclick=async()=>{const n=$('npName').value.trim();if(!n)return;await api('POST','/api/project',{name:n,color:$('npColor').value});$('npName').value='';await load()};
