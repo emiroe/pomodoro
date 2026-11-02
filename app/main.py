@@ -24,6 +24,9 @@ CREATE TABLE IF NOT EXISTS todos (id serial PRIMARY KEY, text text NOT NULL, don
 ALTER TABLE todos ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'todo';
 ALTER TABLE todos ADD COLUMN IF NOT EXISTS status_at timestamptz NOT NULL DEFAULT now();   -- when it entered its current tab (Finished shows newest first)
 UPDATE todos SET status='finished' WHERE done AND status='todo';   -- before the tabs existed 'done' was the only state
+ALTER TABLE todos ADD COLUMN IF NOT EXISTS prio int;          -- 1 (most urgent) .. 4, NULL = none
+ALTER TABLE todos ADD COLUMN IF NOT EXISTS position int;
+UPDATE todos SET position = id WHERE position IS NULL;
 CREATE TABLE IF NOT EXISTS projects (name text PRIMARY KEY, color text NOT NULL DEFAULT '#7c9cff', position serial);
 CREATE TABLE IF NOT EXISTS settings (key text PRIMARY KEY, value text NOT NULL);
 INSERT INTO settings VALUES ('focus_min','25'),('short_min','5'),('long_min','15'),('long_every','4'),('daily_goal','8') ON CONFLICT DO NOTHING;
@@ -130,9 +133,10 @@ def state(req: Request):
 TODO_STATUS = ("todo", "hold", "review", "finished")
 
 def todo_list(c):
-    return [{"id": r[0], "text": r[1], "status": r[2], "at": int(r[3].timestamp())} for r in c.execute("SELECT id,text,status,status_at FROM todos ORDER BY id").fetchall()]
+    return [{"id": r[0], "text": r[1], "status": r[2], "at": int(r[3].timestamp()), "prio": r[4], "pos": r[5]}
+            for r in c.execute("SELECT id,text,status,status_at,prio,position FROM todos ORDER BY position, id").fetchall()]
 
-class Todo(BaseModel): text: str | None = None; status: str | None = None
+class Todo(BaseModel): text: str | None = None; status: str | None = None; prio: int | None = None   # prio 0 = none
 
 @app.post("/api/todo")
 def todo_add(b: Todo, req: Request):
@@ -140,7 +144,7 @@ def todo_add(b: Todo, req: Request):
     text = (b.text or "").strip()[:200]; status = b.status or "todo"
     if not text or status not in TODO_STATUS: raise HTTPException(400, "bad to-do")
     with pool.connection() as c:
-        c.execute("INSERT INTO todos(text,status,done) VALUES (%s,%s,%s)", (text, status, status == "finished")); return {"todos": todo_list(c)}
+        c.execute("INSERT INTO todos(text,status,done,position) VALUES (%s,%s,%s,(SELECT coalesce(max(position),0)+1 FROM todos))", (text, status, status == "finished")); return {"todos": todo_list(c)}
 
 @app.post("/api/todo/{tid}")
 def todo_update(tid: int, b: Todo, req: Request):
@@ -149,6 +153,23 @@ def todo_update(tid: int, b: Todo, req: Request):
     with pool.connection() as c:
         if b.status is not None: c.execute("UPDATE todos SET status=%s, done=%s, status_at=now() WHERE id=%s AND status<>%s", (b.status, b.status == "finished", tid, b.status))
         if b.text is not None and b.text.strip(): c.execute("UPDATE todos SET text=%s WHERE id=%s", (b.text.strip()[:200], tid))
+        if b.prio is not None:
+            if not 0 <= b.prio <= 4: raise HTTPException(400, "bad priority")
+            c.execute("UPDATE todos SET prio=%s WHERE id=%s", (b.prio or None, tid))
+        return {"todos": todo_list(c)}
+
+class Order(BaseModel): ids: list[int]
+
+@app.post("/api/todos/order")
+def todo_order(b: Order, req: Request):
+    # the given ids (the visible ones of one tab) swap places among THEMSELVES: they reuse their own sorted positions in the new order,
+    # so items that were not on screen keep their place
+    need_auth(req)
+    ids = b.ids[:500]
+    with pool.connection() as c:
+        have = {r[0]: r[1] for r in c.execute("SELECT id,position FROM todos WHERE id = ANY(%s)", (ids,)).fetchall()}
+        ids = [i for i in ids if i in have]
+        for i, pos in zip(ids, sorted(have.values())): c.execute("UPDATE todos SET position=%s WHERE id=%s", (pos, i))
         return {"todos": todo_list(c)}
 
 @app.delete("/api/todo/{tid}")

@@ -162,3 +162,16 @@ def test_todos(c):
     left = {t["id"]: t["status"] for t in c.delete("/api/todos/done").json()["todos"]}; assert a["id"] not in left and left[b["id"]] == "hold"   # only Finished is cleared
     assert b["id"] not in {t["id"] for t in c.delete(f"/api/todo/{b['id']}").json()["todos"]}
     l = c.post("/api/todo", json={"text": "newer"}).json()["todos"][-1]; assert l["at"] > 0
+
+def test_todo_priority_and_order(c):
+    c.post("/api/login", json={"password": os.environ["EDIT_PASSWORD"]})
+    ids = [c.post("/api/todo", json={"text": "o%d" % i}).json()["todos"][-1]["id"] for i in range(4)]
+    assert [t["pos"] for t in c.get("/api/state").json()["todos"] if t["id"] in ids] == sorted(t["pos"] for t in c.get("/api/state").json()["todos"] if t["id"] in ids)
+    assert c.post(f"/api/todo/{ids[0]}", json={"prio": 5}).status_code == 400
+    t = {x["id"]: x for x in c.post(f"/api/todo/{ids[2]}", json={"prio": 1}).json()["todos"]}; assert t[ids[2]]["prio"] == 1 and t[ids[0]]["prio"] is None
+    t = {x["id"]: x for x in c.post(f"/api/todo/{ids[2]}", json={"prio": 0}).json()["todos"]}; assert t[ids[2]]["prio"] is None      # 0 clears it
+    new = [ids[3], ids[1], ids[0]]                                                       # ids[2] is not on screen: it keeps its place
+    order = [x["id"] for x in c.post("/api/todos/order", json={"ids": new}).json()["todos"] if x["id"] in ids]
+    assert order == [ids[3], ids[2], ids[1], ids[0]] or [i for i in order if i != ids[2]] == new
+    assert [i for i in order if i != ids[2]] == new
+    for i in ids: c.delete(f"/api/todo/{i}")
