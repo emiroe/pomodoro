@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS todos (id serial PRIMARY KEY, text text NOT NULL, don
 ALTER TABLE todos ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'todo';
 ALTER TABLE todos ADD COLUMN IF NOT EXISTS status_at timestamptz NOT NULL DEFAULT now();   -- when it entered its current tab (Finished shows newest first)
 UPDATE todos SET status='finished' WHERE done AND status='todo';   -- before the tabs existed 'done' was the only state
+ALTER TABLE todos ADD COLUMN IF NOT EXISTS client_id text;   -- ref given by the menu bar plugin for to-dos it created offline (makes the sync idempotent)
+CREATE UNIQUE INDEX IF NOT EXISTS todos_client_id ON todos(client_id) WHERE client_id IS NOT NULL;
 ALTER TABLE todos ADD COLUMN IF NOT EXISTS prio int;          -- 1 (most urgent) .. 4, NULL = none
 ALTER TABLE todos ADD COLUMN IF NOT EXISTS position int;
 UPDATE todos SET position = id WHERE position IS NULL;
@@ -374,16 +376,19 @@ def timer_reset(req: Request):
 # ---- menu bar plugin (SwiftBar / xbar on the Mac): the page downloads a tiny script holding a timer-only key; the server renders the menu.
 PLUGIN = r"""#!/bin/bash
 # <swiftbar.title>Pomodoro</swiftbar.title><xbar.title>Pomodoro</xbar.title>
-# Pomodoro timer in the menu bar. Refreshes every second (name: pomodoro.1s.sh). The key can only control the timer and upload finished
-# pomodoros; revoke it in Pomodoro > Settings. Notification + sound when a pomodoro or break ends.
-# OFFLINE: when the site cannot be reached (e.g. at the office) this script runs its own timer, keeps every finished pomodoro in a queue
-# on this Mac and uploads the queue by itself as soon as the site is reachable again. Data: ~/Library/Application Support/pomodoro-offline
+# Pomodoro timer + to-do list in the menu bar. Refreshes every second (name: pomodoro.1s.sh). The key can only control the timer,
+# upload finished pomodoros and sync to-dos; revoke it in Pomodoro > Settings. Notification + sound when a pomodoro or break ends.
+# OFFLINE: when the site cannot be reached (e.g. at the office) this script runs its own timer and works on its own copy of the to-do list.
+# Finished pomodoros and every to-do change (add, move to another tab, priority, delete) are kept on this Mac and uploaded by themselves
+# as soon as the site is reachable again. Data: ~/Library/Application Support/pomodoro-offline
 URL="@BASE@"; KEY="@SECRET@"; SELF="$0"
 D="$HOME/Library/Application Support/pomodoro-offline"; mkdir -p "$D"
 STATE="$D/state"; QUEUE="$D/queue"; CONF="$D/config"; PROJ="$D/projects"; EVF="$HOME/Library/Caches/pomodoro-plugin.event"
+TODOS="$D/todos.tsv"; OPS="$D/todo-ops.tsv"; touch "$TODOS"
 NOW=$(date +%s)
 notify(){ osascript -e "display notification \"$1\" with title \"Pomodoro\" sound name \"Glass\"" >/dev/null 2>&1 & }
 clean(){ printf '%s' "$1" | tr -d "\"'\\\\\`\$\t\r\n" | cut -c1-60; }
+line(){ printf '%s' "$1" | tr -d '"\\\r\n' | tr '\t' ' ' | cut -c1-200; }     # one plain line, safe inside the JSON we build
 FOCUS=25; SHORT=5; LONG=15; EVERY=4
 [ -f "$CONF" ] && IFS=: read FOCUS SHORT LONG EVERY < "$CONF"
 PHASE=focus; DUR=0; ACC=0; START=0; PROJECT=""; CYCLE=0
@@ -393,7 +398,11 @@ phase_secs(){ case "$1" in focus) echo $((FOCUS*60));; short) echo $((SHORT*60))
 [ "$DUR" -gt 0 ] 2>/dev/null || DUR=$(phase_secs "$PHASE")
 active(){ [ -f "$STATE" ] && { [ "$START" -gt 0 ] || [ "$ACC" -gt 0 ]; }; }
 
-# ---- actions of the offline menu (this script calls itself)
+# ---- to-dos: always shown from the local copy (todos.tsv: ref, status, prio, text); every change is applied there AND queued (todo-ops.tsv)
+todo_queue(){ printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "${3:--}" "${4:--}" "$NOW" "$5" >> "$OPS"; }   # op ref status prio time text
+todo_apply(){ awk -F'\t' -v OFS='\t' -v r="$1" -v f="$2" -v v="$3" '$1==r{ if(f=="status")$2=v; else $3=v } {print}' "$TODOS" > "$TODOS.tmp" && mv "$TODOS.tmp" "$TODOS"; }
+
+# ---- actions of the menus (this script calls itself)
 case "$1" in
   startas) PROJECT=$(clean "$2"); START=0; shift; set -- start;;
 esac
@@ -402,9 +411,18 @@ case "$1" in
   pause)  [ "$START" -gt 0 ] && { ACC=$((ACC + NOW - START)); START=0; save; }; exit 0;;
   skip)   if [ "$PHASE" = focus ]; then ACC=0; START=0; else PHASE=focus; ACC=0; START=0; DUR=$((FOCUS*60)); fi; save; exit 0;;
   reset)  rm -f "$STATE"; exit 0;;
+  todoadd)
+    TXT=$(osascript -e 'text returned of (display dialog "New to-do" default answer "" with title "Pomodoro")' 2>/dev/null) || exit 0
+    TXT=$(line "$TXT"); [ -n "$TXT" ] || exit 0
+    REF="c$NOW-$RANDOM"; todo_queue add "$REF" todo 0 "$TXT"; printf '%s\ttodo\t0\t%s\n' "$REF" "$TXT" >> "$TODOS"; exit 0;;
+  todoset)   # todoset <ref> status|prio <value>
+    if [ "$3" = status ]; then todo_queue set "$2" "$4" - ""; else todo_queue set "$2" - "$4" ""; fi
+    todo_apply "$2" "$3" "$4"; exit 0;;
+  tododel)
+    todo_queue del "$2" - - ""; awk -F'\t' -v r="$2" '$1!=r' "$TODOS" > "$TODOS.tmp" && mv "$TODOS.tmp" "$TODOS"; exit 0;;
 esac
 
-# ---- upload the queue (only while nothing else is uploading)
+# ---- upload the queues (only while nothing else is uploading)
 flush(){
   [ -s "$QUEUE" ] || return 0
   mkdir "$D/lock" 2>/dev/null || return 0
@@ -414,7 +432,46 @@ flush(){
   else cat "$QUEUE.sending" >> "$QUEUE"; rm -f "$QUEUE.sending"; fi
   rmdir "$D/lock"
 }
+tflush(){
+  [ -s "$OPS" ] || return 0
+  mkdir "$D/tlock" 2>/dev/null || return 0
+  mv "$OPS" "$OPS.sending"
+  JSON=$(awk -F'\t' 'BEGIN{printf "{\"ops\":["} {printf "%s{\"op\":\"%s\",\"ref\":\"%s\",\"t\":%s", (NR>1?",":""), $1, $2, $5; if($3!="-")printf ",\"status\":\"%s\"", $3; if($4!="-")printf ",\"prio\":%s", $4; if($6!="")printf ",\"text\":\"%s\"", $6; printf "}"} END{printf "]}"}' "$OPS.sending")
+  if curl -fsS -m 15 -X POST -H "X-Timer-Key: $KEY" -H "Content-Type: application/json" -d "$JSON" "$URL/api/todos/sync" >/dev/null 2>&1; then rm -f "$OPS.sending"
+  else cat "$OPS.sending" >> "$OPS"; rm -f "$OPS.sending"; fi
+  rmdir "$D/tlock"
+}
 queued(){ [ -s "$QUEUE" ] && wc -l < "$QUEUE" | tr -d ' ' || echo 0; }
+tqueued(){ [ -s "$OPS" ] && wc -l < "$OPS" | tr -d ' ' || echo 0; }
+
+# ---- the to-do submenu (same online and offline)
+todo_menu(){
+  A="terminal=false refresh=true"
+  echo "---"; echo "To do ($(awk -F'\t' '$2!="finished"' "$TODOS" | wc -l | tr -d ' '))"
+  echo "--Add to-do… | bash=\"$SELF\" param1=todoadd $A"
+  for TAB in todo hold review finished; do
+    case $TAB in todo) LBL="To Do";; hold) LBL="On Hold";; review) LBL="Review";; *) LBL="Finished";; esac
+    CNT=$(awk -F'\t' -v t="$TAB" '$2==t' "$TODOS" | wc -l | tr -d ' ')
+    echo "--$LBL ($CNT)"
+    awk -F'\t' -v OFS='\t' -v t="$TAB" '$2==t{k=($3>0?$3:5)*100000+NR; if(t=="finished")k=NR; print k,$0}' "$TODOS" | sort -n | head -12 | while IFS=$'\t' read -r K REF ST PR TX; do
+      [ -n "$REF" ] || continue
+      B="•"; [ "$PR" -gt 0 ] 2>/dev/null && B="P$PR"
+      echo "----$B $(printf '%s' "$TX" | tr '|' '/' | cut -c1-60)"
+      [ "$ST" != finished ] && echo "------✓ Finish | bash=\"$SELF\" param1=todoset param2=$REF param3=status param4=finished $A"
+      for S2 in todo hold review; do
+        [ "$S2" = "$ST" ] && continue
+        case $S2 in todo) N2="To Do";; hold) N2="On Hold";; *) N2="Review";; esac
+        echo "------Move to $N2 | bash=\"$SELF\" param1=todoset param2=$REF param3=status param4=$S2 $A"
+      done
+      for P in 1 2 3 4 0; do
+        [ "$P" = "$PR" ] && continue
+        echo "------Priority $([ "$P" = 0 ] && echo none || echo P$P) | bash=\"$SELF\" param1=todoset param2=$REF param3=prio param4=$P $A"
+      done
+      echo "------Delete | bash=\"$SELF\" param1=tododel param2=$REF $A"
+    done
+    [ "$CNT" -gt 12 ] && echo "----… $((CNT-12)) more (open Pomodoro) | href=$URL"
+  done
+}
 
 # ---- offline timer
 offline_menu(){
@@ -431,7 +488,7 @@ offline_menu(){
   CLK=$(printf '%02d:%02d' $((REM/60)) $((REM%60)))
   if [ "$PHASE" = focus ]; then ICON="🍅"; else ICON="☕"; fi; [ "$START" -eq 0 ] && [ "$ACC" -gt 0 ] && ICON="⏸"
   echo "📴 $ICON $CLK"; echo "---"
-  echo "Offline: timer runs on this Mac, uploads when the site is reachable"
+  echo "Offline: timer and to-dos work on this Mac and upload when the site is reachable"
   [ "$PHASE" = focus ] && [ -n "$PROJECT" ] && echo "Focus · $PROJECT"
   A="terminal=false refresh=true"
   if [ "$START" -gt 0 ]; then echo "Pause | bash=\"$SELF\" param1=pause $A"
@@ -442,19 +499,24 @@ offline_menu(){
     echo "Start as…"
     tr ',' '\n' < "$PROJ" | while read -r P; do N=$(printf '%b' "${P//%/\\x}"); echo "--$(clean "$N") | bash=\"$SELF\" param1=startas param2=\"$(clean "$N")\" $A"; done
   fi
-  echo "---"; echo "Waiting to upload: $(queued) pomodoro(s)"
+  echo "---"; echo "Waiting to upload: $(queued) pomodoro(s), $(tqueued) to-do change(s)"
+  todo_menu
 }
 
 # ---- an unfinished local block keeps running locally until it is done (so nothing is lost when the site comes back mid-block)
-if active; then flush; offline_menu; exit 0; fi
+if active; then flush; tflush; offline_menu; exit 0; fi
 
 HDR=$(mktemp)
 if BODY=$(curl -fsS -m 3 -D "$HDR" -H "X-Timer-Key: $KEY" "$URL/api/menubar" 2>/dev/null); then
   hv(){ tr -d '\r' < "$HDR" | awk -F': ' -v k="$1" 'tolower($1)==k{print $2}'; }
   EV=$(hv x-pomodoro-event); C=$(hv x-pomodoro-config); P=$(hv x-pomodoro-projects); rm -f "$HDR"
   [ -n "$C" ] && echo "$C" > "$CONF"; [ -n "$P" ] && echo "$P" > "$PROJ"
-  printf '%s\n' "$BODY" | sed "s|@URL@|$URL|g;s|@KEY@|$KEY|g"
+  # the server's to-do list replaces the local copy, but never while local changes are still waiting to be uploaded
+  [ -s "$OPS" ] || { printf '%s\n' "$BODY" | { grep '^@@TODO@@' || true; } | cut -f2- > "$TODOS.new"; mv "$TODOS.new" "$TODOS"; }
+  printf '%s\n' "$BODY" | { grep -v '^@@TODO@@' || true; } | sed "s|@URL@|$URL|g;s|@KEY@|$KEY|g"
+  todo_menu
   [ -s "$QUEUE" ] && flush
+  tflush
   [ -f "$STATE" ] && rm -f "$STATE"
   ID=${EV%%:*}; REST=${EV#*:}; KIND=${REST%%:*}; AGE=${REST#*:}; LAST=$(cat "$EVF" 2>/dev/null)
   if [ -n "$ID" ] && [ "$ID" != "$LAST" ]; then
@@ -477,6 +539,42 @@ def menubar_key(req: Request):
 
 def menu_action(label, path, extra=""):
     return f"{label} | bash=/usr/bin/curl param1=-fsS param2=-X param3=POST param4=-H param5=X-Timer-Key:@KEY@ param6=@URL@{path} terminal=false refresh=true{extra}"
+
+class TodoOp(BaseModel):
+    op: str; ref: str; text: str | None = None; status: str | None = None; prio: int | None = None; t: int = 0   # t = when the change was made (epoch seconds)
+class TodoSync(BaseModel): ops: list[TodoOp]
+
+def todo_id(c, ref):
+    # ref 's12' = server id 12, 'c...' = a to-do the plugin created offline
+    if ref[:1] == "s" and ref[1:].isdigit() and len(ref) < 12: r = c.execute("SELECT id FROM todos WHERE id=%s", (int(ref[1:]),)).fetchone()   # gone (deleted on the web)? then the change is skipped
+    elif ref[:1] == "c": r = c.execute("SELECT id FROM todos WHERE client_id=%s", (ref,)).fetchone()
+    else: r = None
+    return r[0] if r else None
+
+@app.post("/api/todos/sync")
+def todos_sync(b: TodoSync, req: Request):
+    # changes made in the menu bar plugin (possibly hours ago, offline), applied in order. Repeating a batch changes nothing more.
+    # A status change older than the to-do's last status change (e.g. it was already moved on the web) is skipped: newest wins.
+    need_timer(req)
+    done = skipped = 0
+    with pool.connection() as c:
+        for o in b.ops[:500]:
+            st = o.status if o.status in TODO_STATUS else None
+            if o.op == "add":
+                text = (o.text or "").strip()[:200]
+                if not text or not o.ref.startswith("c") or len(o.ref) > 60: skipped += 1; continue
+                r = c.execute("INSERT INTO todos(text,status,done,prio,client_id,position,status_at) VALUES (%s,%s,%s,%s,%s,(SELECT coalesce(max(position),0)+1 FROM todos),LEAST(to_timestamp(%s),now())) ON CONFLICT (client_id) WHERE client_id IS NOT NULL DO NOTHING RETURNING id",
+                              (text, st or "todo", st == "finished", o.prio if o.prio and 1 <= o.prio <= 4 else None, o.ref, o.t or time.time())).fetchone()
+                done += 1 if r else 0
+                continue
+            tid = todo_id(c, o.ref)
+            if tid is None: skipped += 1; continue
+            if o.op == "del": c.execute("DELETE FROM todos WHERE id=%s", (tid,)); done += 1
+            elif o.op == "set":
+                if st and not (o.t and c.execute("SELECT floor(extract(epoch from status_at)) > %s FROM todos WHERE id=%s", (o.t, tid)).fetchone()[0]):
+                    c.execute("UPDATE todos SET status=%s, done=%s, status_at=LEAST(to_timestamp(%s),now()) WHERE id=%s AND status<>%s", (st, st == "finished", o.t or time.time(), tid, st)); done += 1
+                if o.prio is not None and 0 <= o.prio <= 4: c.execute("UPDATE todos SET prio=%s WHERE id=%s", (o.prio or None, tid)); done += 1
+    return {"applied": done, "skipped": skipped}
 
 class OfflineSession(BaseModel): id: str; end: int; seconds: int; project: str = ""
 class OfflineBatch(BaseModel): sessions: list[OfflineSession]
@@ -516,7 +614,12 @@ def menubar(req: Request):
         L.append("Start as…")
         for n in projects: L.append("--" + menu_action(n.replace("|", "/"), "/api/timer/startp?project=" + urllib.parse.quote(n, safe="")))
     L += ["---", f"Today: {tp} / {st['daily_goal']} pomodoros · {ts // 3600}:{ts // 60 % 60:02d} worked", "Open Pomodoro | href=@URL@"]
-    with pool.connection() as c: ev = dict(c.execute("SELECT key,value FROM settings WHERE key IN ('ev_id','ev_kind','ev_at')").fetchall())
+    with pool.connection() as c:
+        ev = dict(c.execute("SELECT key,value FROM settings WHERE key IN ('ev_id','ev_kind','ev_at')").fetchall())
+        # to-dos for the plugin: open ones P1 first, plus the 10 newest finished. The plugin keeps them as its offline copy and hides these lines.
+        td = c.execute("SELECT id,status,coalesce(prio,0),text FROM todos WHERE status<>'finished' ORDER BY coalesce(prio,5), position, id LIMIT 200").fetchall() \
+           + c.execute("SELECT id,status,coalesce(prio,0),text FROM todos WHERE status='finished' ORDER BY status_at DESC LIMIT 10").fetchall()
+    L += ["@@TODO@@\ts%d\t%s\t%d\t%s" % (i, st_, pr, " ".join(tx.split())) for i, st_, pr, tx in td]
     age = max(0, (now - int(ev.get("ev_at", 0))) // 1000) if ev else 0
     return PlainTextResponse("\n".join(L) + "\n", headers={"X-Pomodoro-Event": f"{ev.get('ev_id', 0)}:{ev.get('ev_kind', '')}:{age}",
         "X-Pomodoro-Config": f"{st['focus_min']}:{st['short_min']}:{st['long_min']}:{st['long_every']}",   # for the offline timer

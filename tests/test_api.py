@@ -175,3 +175,33 @@ def test_todo_priority_and_order(c):
     assert order == [ids[3], ids[2], ids[1], ids[0]] or [i for i in order if i != ids[2]] == new
     assert [i for i in order if i != ids[2]] == new
     for i in ids: c.delete(f"/api/todo/{i}")
+
+def test_todo_sync_from_plugin(c):
+    from fastapi.testclient import TestClient as TC
+    c.post("/api/login", json={"password": os.environ["EDIT_PASSWORD"]}); anon = TC(main.app, base_url="https://testserver")
+    key = re.search(r'KEY="([0-9a-f]+)"', c.post("/api/menubar/key").text).group(1); h = {"X-Timer-Key": key}
+    a = c.post("/api/todo", json={"text": "Existing one"}).json()["todos"][-1]["id"]
+    b = c.post("/api/todo", json={"text": "Existing two"}).json()["todos"][-1]["id"]
+    assert anon.post("/api/todos/sync", json={"ops": []}).status_code == 401
+    # the plugin's copy comes with the menu (hidden lines), P1 first
+    c.post(f"/api/todo/{b}", json={"prio": 1})
+    lines = [l for l in anon.get("/api/menubar", headers=h).text.splitlines() if l.startswith("@@TODO@@")]
+    assert any(l.split("\t")[1] == f"s{b}" and l.split("\t")[3] == "1" for l in lines) and lines[0].split("\t")[1] == f"s{b}"
+    now = int(time.time())
+    ops = [{"op": "add", "ref": "c1-1", "text": "Made offline", "status": "review", "prio": 2, "t": now},
+           {"op": "set", "ref": "c1-1", "status": "finished", "t": now},                  # change a to-do that was created in the same batch
+           {"op": "set", "ref": f"s{a}", "status": "hold", "prio": 3, "t": now},
+           {"op": "del", "ref": f"s{b}", "t": now}, {"op": "set", "ref": "s999999", "status": "hold", "t": now}, {"op": "add", "ref": "bad", "text": "x"}]
+    r = anon.post("/api/todos/sync", headers=h, json={"ops": ops}).json(); assert r["skipped"] == 2
+    st = {t["text"]: t for t in c.get("/api/state").json()["todos"]}
+    assert st["Made offline"]["status"] == "finished" and st["Made offline"]["prio"] == 2 and st["Existing one"]["status"] == "hold" and st["Existing one"]["prio"] == 3 and "Existing two" not in st
+    n = len(st); assert anon.post("/api/todos/sync", headers=h, json={"ops": ops}).status_code == 200
+    assert len(c.get("/api/state").json()["todos"]) == n                                 # repeating the batch adds nothing
+    # an OLD status change (made offline before the to-do was moved on the web) does not win
+    c.post(f"/api/todo/{a}", json={"status": "review"})
+    anon.post("/api/todos/sync", headers=h, json={"ops": [{"op": "set", "ref": f"s{a}", "status": "todo", "t": now - 3600}]})
+    assert {t["id"]: t["status"] for t in c.get("/api/state").json()["todos"]}[a] == "review"
+    anon.post("/api/todos/sync", headers=h, json={"ops": [{"op": "set", "ref": f"s{a}", "status": "todo", "t": now + 60}]})        # a newer one does
+    assert {t["id"]: t["status"] for t in c.get("/api/state").json()["todos"]}[a] == "todo"
+    assert anon.get("/api/state", headers=h).json()["todos"] == []                       # the key does not read the list through the normal API
+    for t in c.get("/api/state").json()["todos"]: c.delete(f"/api/todo/{t['id']}")
