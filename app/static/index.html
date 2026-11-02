@@ -80,6 +80,8 @@ form .row>*{flex:1 1 120px}
 .td button{border:0;background:none;color:var(--dim);font-size:12px;cursor:pointer;padding:2px 6px}
 #todoNew{font-size:13px;padding:6px 10px}
 #tproj,#tnote{font-size:13px;padding:6px 9px}   /* activity picker + description on the timer */
+.tip{position:fixed;z-index:60;background:var(--txt);color:var(--bg);padding:8px 10px;border-radius:10px;font-size:12px;line-height:1.4;max-width:250px;box-shadow:0 6px 24px rgba(0,0,0,.35);pointer-events:none}
+.tip b{display:block;margin-bottom:2px}.tip .tl{display:flex;justify-content:space-between;gap:14px;opacity:.9}
 .toast{position:fixed;left:12px;right:12px;bottom:calc(14px + env(safe-area-inset-bottom));z-index:50;padding:12px 14px;border-radius:14px;background:var(--txt);color:var(--bg);box-shadow:0 8px 30px rgba(0,0,0,.45);font-weight:600}
 .hide{display:none!important}
 @media(max-width:400px){h1{font-size:18px}.ring{width:116px;height:116px}.timer{font-size:26px}.tpanel{gap:12px;padding:12px}}
@@ -119,7 +121,7 @@ form .row>*{flex:1 1 120px}
 </main><div class="toast hide" id="toast"></div>
 <script>
 const $=id=>document.getElementById(id);
-let S=null,T=null,offset=0,range=30,weeks=1;
+let HM=null;let S=null,T=null,offset=0,range=30,weeks=1;
 const fmt=s=>{s=Math.round(s);return Math.floor(s/3600)+':'+String(Math.floor(s/60)%60).padStart(2,'0')+':'+String(s%60).padStart(2,'0')};
 const fmtm=s=>Math.floor(s/3600)+':'+String(Math.floor(s/60)%60).padStart(2,'0');
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -142,8 +144,8 @@ function render(){
  $('auth').textContent=S.edit?'Log out':'Log in';
  $('gear').classList.toggle('hide',!S.edit);$('timerCard').classList.toggle('hide',!S.edit);$('todoCard').classList.toggle('hide',!S.edit);renderTodos();
  if(!S.edit)$('setCard').classList.add('hide');
- const by={},focusBy={};let total=0,pomos=0;
- for(const s of S.sessions){by[s.day]=(by[s.day]||0)+s.seconds;total+=s.seconds;if(s.pomodoro){pomos++;focusBy[s.day]=(focusBy[s.day]||0)+1}}
+ const by={},focusBy={},actBy={};let total=0,pomos=0;   // actBy[day][activity] = seconds, for the heat map tooltip
+ for(const s of S.sessions){by[s.day]=(by[s.day]||0)+s.seconds;((actBy[s.day]=actBy[s.day]||{})[s.project||'No activity']=(actBy[s.day][s.project||'No activity']||0)+s.seconds);total+=s.seconds;if(s.pomodoro){pomos++;focusBy[s.day]=(focusBy[s.day]||0)+1}}
  const st=S.settings,goal=st.daily_goal,goalSec=goal*st.focus_min*60,today=S.today;
  const td=by[today]||0,tp=focusBy[today]||0;
  $('goalTxt').textContent=`${tp} / ${goal} pomodoros`;
@@ -167,7 +169,8 @@ function render(){
   for(let d=0;d<7;d++){const x=new Date(ws);x.setDate(x.getDate()+d);const k=iso(x);
    if(x>t0){h+='<div class="c n"></div>';continue}
    const v=by[k]||0,l=!v?0:1+TH.filter(t=>v>=t).length;
-   h+=`<div class="c${l?' l'+l:''}${k==today?' t':''}" title="${k}: ${fmtm(v)}"></div>`}}
+   h+=`<div class="c${l?' l'+l:''}${k==today?' t':''}" data-d="${k}"></div>`}}
+ HM={by,focusBy,actBy};hideTip();
  $('hm').innerHTML=h+'</div>';$('hm').scrollLeft=1e5;
  const act=Object.keys(by).filter(d=>fromIso(d)>=start).length;$('hmTxt').textContent=`${act} days`;
  // by project
@@ -238,6 +241,18 @@ function renderSettings(){const st=S.settings,f=[['focus_min','Focus (min)'],['s
   $('setForm').innerHTML=f.map(([k,n])=>`<label>${n}<input type="number" data-k="${k}" value="${st[k]}" inputmode="numeric"></label>`).join('')}
  $('pjList').innerHTML=S.projects.map(p=>`<div class="pj"><input type="color" value="${p.color}" data-pc="${esc(p.name)}"><span style="flex:1">${esc(p.name)}</span><button class="btn sm" data-pd="${esc(p.name)}">Remove</button></div>`).join('')}
 
+// ---- heat map tooltip: hover with a mouse, tap on a phone
+const tipEl=document.createElement('div');tipEl.className='tip hide';document.body.appendChild(tipEl);let tipCell=null;
+function hideTip(){tipEl.classList.add('hide');tipCell=null}
+function showTip(cell){if(!HM)return;const d=cell.dataset.d,sec=HM.by[d]||0,n=HM.focusBy[d]||0,acts=Object.entries(HM.actBy[d]||{}).sort((a,b)=>b[1]-a[1]);
+ const title=fromIso(d).toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
+ tipEl.innerHTML=`<b>${title}</b>`+(sec?`<div>${fmt(sec)} worked${n?` · ${n} pomodoro${n>1?'s':''}`:''}</div>`+acts.slice(0,5).map(([a,v])=>`<div class="tl"><span>${esc(a)}</span><span>${fmtm(v)}</span></div>`).join('')+(acts.length>5?`<div class="tl"><span>+ ${acts.length-5} more</span><span></span></div>`:''):'<div>Nothing logged</div>');
+ tipEl.classList.remove('hide');tipCell=cell;const r=cell.getBoundingClientRect(),w=tipEl.offsetWidth,h=tipEl.offsetHeight;
+ let x=Math.min(Math.max(8,r.left+r.width/2-w/2),innerWidth-w-8),y=r.top-h-8;if(y<8)y=r.bottom+8;tipEl.style.left=x+'px';tipEl.style.top=y+'px'}
+$('hm').addEventListener('pointerover',e=>{if(e.pointerType==='touch')return;const c=e.target.closest('.c[data-d]');c?showTip(c):hideTip()});
+$('hm').addEventListener('pointerleave',e=>{if(e.pointerType!=='touch')hideTip()});
+$('hm').addEventListener('click',e=>{const c=e.target.closest('.c[data-d]');if(!c)return hideTip();tipCell===c?hideTip():showTip(c)});
+$('hm').addEventListener('scroll',hideTip);document.addEventListener('click',e=>{if(!e.target.closest('#hm'))hideTip()});
 // ---- timer
 let completing=false;
 function remaining(){const run=T.start?Date.now()+offset-T.start:0;return T.dur-(T.acc+run)}
