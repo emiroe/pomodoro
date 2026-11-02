@@ -49,7 +49,12 @@ def test_timer(c):
             t = c.post("/api/timer/skip").json()["timer"]; assert t["phase"] == "focus"
         ss = c.get("/api/state").json()["sessions"]
         assert len(ss) == n0 + 2 and ss[0]["pomodoro"] and ss[0]["project"] == "Deep" and ss[0]["seconds"] == 60
-        c.post("/api/timer/start", json={})
-        with main.pool.connection() as db: db.execute("UPDATE timer SET start_ms=%s, acc_ms=0 WHERE id=1", (main.now_ms() - 90000,))
-        c.post("/api/timer/pause"); assert c.post("/api/timer/finish").json()["timer"]["phase"] in ("short", "long")
+        c.post("/api/timer/start", json={"project": "Auto"})                          # the server ticker closes a due block by itself
+        with main.pool.connection() as db: db.execute("UPDATE timer SET start_ms=%s, acc_ms=0 WHERE id=1", (main.now_ms() - 61000,))
+        main.tick()
+        t = c.get("/api/timer").json()["timer"]; assert t["phase"] in ("short", "long") and t["start"] == 0
+        assert c.get("/api/state").json()["sessions"][0]["project"] == "Auto"
+        c.post("/api/timer/skip"); c.post("/api/timer/start", json={})
+        with main.pool.connection() as db: db.execute("UPDATE timer SET acc_ms=90000, start_ms=0 WHERE id=1")   # paused after 90 s
+        assert c.post("/api/timer/finish").json()["timer"]["phase"] in ("short", "long")
         c.post("/api/settings", json={"focus_min": 25, "long_every": 4})

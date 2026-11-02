@@ -1,4 +1,4 @@
-import os, hmac, hashlib, time, datetime, csv, io
+import asyncio, os, hmac, hashlib, time, datetime, csv, io
 from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
 from psycopg_pool import ConnectionPool
@@ -29,7 +29,9 @@ LIMITS = {"focus_min": (1, 180), "short_min": (1, 60), "long_min": (1, 120), "lo
 async def lifespan(app):
     pool.open(wait=True)
     with pool.connection() as c: c.execute(SCHEMA)
+    task = asyncio.create_task(ticker())
     yield
+    task.cancel()
     pool.close()
 
 app = FastAPI(lifespan=lifespan)
@@ -189,16 +191,28 @@ def timer_label(b: TimerStart, req: Request):
         c.execute("UPDATE timer SET project=%s,note=%s WHERE id=1", (ensure_project(c, b.project or ""), (b.note or "")[:300]))
         return timer_state(c)
 
+def complete_if_due(c):
+    # acts only when the countdown really reached 0 on the server clock; the block is logged with the moment it ended
+    s = timer_state(c)["timer"]
+    if not s["start"]: return
+    el = s["acc"] + now_ms() - s["start"]
+    if el >= s["dur"]: move_on(c, s["dur"] // 1000, s["start"] + (s["dur"] - s["acc"]))
+
+async def ticker():
+    # the server itself closes finished blocks (no browser needs to be open)
+    while True:
+        await asyncio.sleep(5)
+        try: await asyncio.to_thread(tick)
+        except Exception as e: print("ticker:", e)
+
+def tick():
+    with pool.connection() as c: complete_if_due(c)
+
 @app.post("/api/timer/complete")
 def timer_complete(req: Request):
-    # only acts when the countdown really reached 0 on the server clock
     need_auth(req)
     with pool.connection() as c:
-        s = timer_state(c)["timer"]
-        el = s["acc"] + (now_ms() - s["start"] if s["start"] else 0)
-        if el >= s["dur"]:
-            end = s["start"] + (s["dur"] - s["acc"]) if s["start"] else now_ms()
-            move_on(c, s["dur"] // 1000, end)
+        complete_if_due(c)
         return timer_state(c)
 
 @app.post("/api/timer/finish")
