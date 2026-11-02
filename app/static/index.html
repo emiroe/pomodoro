@@ -82,11 +82,11 @@ form .row>*{flex:1 1 120px}
 <div class="card"><div class="stats" id="stats"></div></div>
 <div class="card"><h2>Last 12 months <span style="text-transform:none;letter-spacing:0" id="hmTxt"></span></h2><div class="hm" id="hm"></div>
 <div class="hl">less <span class="c"></span><span class="c l1"></span><span class="c l2"></span><span class="c l3"></span><span class="c l4"></span><span class="c l5"></span><span class="c l6"></span><span class="c l7"></span><span class="c l8"></span><span class="c l9"></span><span class="c l10"></span> more</div></div>
-<div class="card"><h2>By project <span class="seg" id="range"><button data-r="7">Week</button><button data-r="30" class="on">Month</button><button data-r="0">All</button></span></h2><div id="byProj"></div></div>
+<div class="card"><h2>By activity <span class="seg" id="range"><button data-r="7">Week</button><button data-r="30" class="on">Month</button><button data-r="0">All</button></span></h2><div id="byProj"></div></div>
 
 <div class="card hide" id="setCard"><h2>Settings</h2>
 <div class="set" id="setForm"></div><div id="pjList"></div>
-<div class="pj"><input type="text" id="npName" placeholder="New project" maxlength="60"><input type="color" id="npColor" value="#7c9cff"><button class="btn sm" id="npAdd">Add</button></div>
+<div class="pj"><input type="text" id="npName" placeholder="New activity" maxlength="60"><input type="color" id="npColor" value="#7c9cff"><button class="btn sm" id="npAdd">Add</button></div>
 <div class="row" style="margin-top:12px"><a class="btn sm" href="/api/export.csv" style="text-decoration:none">Export CSV</a><button class="btn sm" id="pwBtn">Change password</button><button class="btn sm" id="mbBtn">Mac menu bar plugin</button></div>
 <div id="mbHelp" class="hide" style="margin-top:10px;font-size:13px;color:var(--dim);line-height:1.5"></div>
 <form id="pwForm" class="hide" autocomplete="off" style="margin-top:10px"><div class="row"><input type="password" id="pwCur" placeholder="Current password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" required>
@@ -115,7 +115,7 @@ async function load(){S=await api('GET','/api/state');render();if(S.edit){await 
 function syncLabel(){if(!T)return;projOptions($('tproj'),T.project);if(document.activeElement!==$('tnote'))$('tnote').value=T.note||''}
 async function loadTimer(){const r=await api('GET','/api/timer');T=r.timer;offset=r.now-Date.now()}
 
-function projOptions(sel,val){sel.innerHTML='<option value="">No project</option>'+S.projects.map(p=>`<option>${esc(p.name)}</option>`).join('')+'<option value="__new">+ New project…</option>';
+function projOptions(sel,val){sel.innerHTML='<option value="">No activity</option>'+S.projects.map(p=>`<option>${esc(p.name)}</option>`).join('')+'<option value="__new">+ New activity…</option>';
  if(val&&!S.projects.some(p=>p.name==val)){sel.insertAdjacentHTML('afterbegin',`<option>${esc(val)}</option>`)}sel.value=val||''}
 
 function render(){
@@ -152,14 +152,14 @@ function render(){
  const act=Object.keys(by).filter(d=>fromIso(d)>=start).length;$('hmTxt').textContent=`${act} days`;
  // by project
  const cut=range?new Date(t0.getTime()-(range-1)*864e5):null,pj={};
- for(const s of S.sessions)if(!cut||fromIso(s.day)>=cut)pj[s.project||'No project']=(pj[s.project||'No project']||0)+s.seconds;
+ for(const s of S.sessions)if(!cut||fromIso(s.day)>=cut)pj[s.project||'No activity']=(pj[s.project||'No activity']||0)+s.seconds;
  const ent=Object.entries(pj).sort((a,b)=>b[1]-a[1]),mx=ent.length?ent[0][1]:1;
  $('byProj').innerHTML=ent.length?ent.map(([n,v])=>`<div class="pr"><div class="n"><i class="dot" style="background:${pcolor(n)}"></i>${esc(n)}</div><div class="bar"><i style="width:${v/mx*100}%;background:${pcolor(n)}"></i></div><div class="v">${fmtm(v)}</div></div>`).join(''):'<div style="color:var(--dim);font-size:13px">Nothing logged in this period.</div>';
  // list
  let l='',lastD='';const dayTot=by,cutoff=iso(new Date(t0.getTime()-(7*weeks-1)*864e5)),shown=S.sessions.filter(x=>x.day>=cutoff),more=S.sessions.length>shown.length;   // last 7 days, 'Load more' adds another week
  for(const s of shown){
   if(s.day!=lastD){lastD=s.day;l+=`<div class="day">${fromIso(s.day).toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short',year:'numeric'})}<span>${fmt(dayTot[s.day])}</span></div>`}
-  l+=`<div class="sess"><i class="dot" style="background:${pcolor(s.project)}"></i><div class="m">${esc(s.project||'No project')}${s.start?`<small>${s.start}–${s.end}${s.note?' · '+esc(s.note):''}</small>`:s.note?`<small>${esc(s.note)}</small>`:''}</div><div class="d">${fmt(s.seconds)}</div>${S.edit?`<button class="btn sm" data-x="${s.id}">✕</button>`:''}</div>`}
+  l+=`<div class="sess"><i class="dot" style="background:${pcolor(s.project)}"></i><div class="m">${esc(s.project||'No activity')}${s.start?`<small>${s.start}–${s.end}${s.note?' · '+esc(s.note):''}</small>`:s.note?`<small>${esc(s.note)}</small>`:''}</div><div class="d">${fmt(s.seconds)}</div>${S.edit?`<button class="btn sm" data-x="${s.id}">✕</button>`:''}</div>`}
  if(!l)l=`<div style="color:var(--dim)">${S.sessions.length?`No sessions in the last ${7*weeks} days.`:'No sessions yet.'}</div>`;
  $('list').innerHTML=l+(more?'<div style="text-align:center;margin-top:12px"><button class="btn" data-more="1">Load more</button></div>':'');
  if(S.edit){projOptions($('tproj'),T?T.project:'');renderSettings()}
@@ -208,7 +208,7 @@ $('go').onclick=async()=>{if(window.Notification&&Notification.permission=='defa
 $('fin').onclick=async()=>{if(await tcall('POST','/api/timer/finish')){S=await api('GET','/api/state');render();toast('Logged')}};
 $('skip').onclick=async()=>{if(T.phase=='focus'&&(T.acc||T.start)&&!confirm('Restart this pomodoro? The time so far is not logged.'))return;await tcall('POST','/api/timer/skip')};
 $('reset').onclick=async()=>{if(!confirm('Reset the day? Time done on the current block is logged, then the timer starts again at pomodoro 1.'))return;const r=await tcall('DELETE','/api/timer');if(r){S=await api('GET','/api/state');render();if(r.logged)toast('Logged '+fmt(r.logged)+' on '+S.sessions[0].day);}};
-$('tproj').onchange=async()=>{if($('tproj').value=='__new'){const n=(prompt('Project name')||'').trim();if(n){await api('POST','/api/project',{name:n,color:'#7c9cff'});S=await api('GET','/api/state');render();$('tproj').value=n}else $('tproj').value=T.project}
+$('tproj').onchange=async()=>{if($('tproj').value=='__new'){const n=(prompt('Activity name')||'').trim();if(n){await api('POST','/api/project',{name:n,color:'#7c9cff'});S=await api('GET','/api/state');render();$('tproj').value=n}else $('tproj').value=T.project}
  await tcall('POST','/api/timer/label',label())};
 let noteT=null;const saveLabel=()=>{clearTimeout(noteT);noteT=null;return tcall('POST','/api/timer/label',label())};
 $('tnote').oninput=()=>{clearTimeout(noteT);noteT=setTimeout(saveLabel,500)};   // saved while typing, not only when leaving the box

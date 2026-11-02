@@ -465,7 +465,7 @@ def export(req: Request):
     need_auth(req)
     with pool.connection() as c:
         rows = c.execute("SELECT day,seconds,project,note,pomodoro FROM sessions ORDER BY day,id").fetchall()
-    o = io.StringIO(); w = csv.writer(o); w.writerow(["date", "duration", "seconds", "project", "note", "pomodoro"])
+    o = io.StringIO(); w = csv.writer(o); w.writerow(["date", "duration", "seconds", "activity", "note", "pomodoro"])
     for r in rows: w.writerow([r[0].isoformat(), "%d:%02d:%02d" % (r[1] // 3600, r[1] // 60 % 60, r[1] % 60), r[1], r[2], r[3], r[4]])
     return PlainTextResponse(o.getvalue(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=pomodoro-sessions.csv"})
 
