@@ -1,0 +1,32 @@
+services:
+  pomodoro-db:
+    container_name: pomodoro-db
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pomodoro
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: pomodoro
+    volumes:
+      - pomodoro_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pomodoro -d pomodoro"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+  pomodoro:
+    container_name: pomodoro
+    build: .
+    restart: unless-stopped
+    depends_on:
+      pomodoro-db: {condition: service_healthy}
+    ports: ["7360:8000"]
+    environment:
+      DATABASE_URL: postgresql://pomodoro:${POSTGRES_PASSWORD}@pomodoro-db:5432/pomodoro
+      SECRET_KEY: ${SECRET_KEY}
+      EDIT_PASSWORD: ${EDIT_PASSWORD}
+      TZ: Europe/Amsterdam
+    logging: {driver: json-file, options: {max-size: "10m", max-file: "3"}}
+volumes:
+  pomodoro_db:
