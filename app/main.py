@@ -29,6 +29,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS todos_client_id ON todos(client_id) WHERE clie
 ALTER TABLE todos ADD COLUMN IF NOT EXISTS prio int;          -- 1 (most urgent) .. 4, NULL = none
 ALTER TABLE todos ADD COLUMN IF NOT EXISTS position int;
 UPDATE todos SET position = id WHERE position IS NULL;
+CREATE TABLE IF NOT EXISTS subtasks (id serial PRIMARY KEY, todo_id int NOT NULL REFERENCES todos(id) ON DELETE CASCADE, text text NOT NULL,
+  done boolean NOT NULL DEFAULT false, position int NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS subtasks_todo ON subtasks(todo_id);
 CREATE TABLE IF NOT EXISTS projects (name text PRIMARY KEY, color text NOT NULL DEFAULT '#7c9cff', position serial);
 CREATE TABLE IF NOT EXISTS settings (key text PRIMARY KEY, value text NOT NULL);
 INSERT INTO settings VALUES ('focus_min','25'),('short_min','5'),('long_min','15'),('long_every','4'),('daily_goal','8') ON CONFLICT DO NOTHING;
@@ -144,8 +147,39 @@ def state(req: Request):
 TODO_STATUS = ("todo", "inprogress", "hold", "review", "finished")
 
 def todo_list(c):
-    return [{"id": r[0], "text": r[1], "status": r[2], "at": int(r[3].timestamp()), "prio": r[4], "pos": r[5]}
+    subs = {}
+    for r in c.execute("SELECT id,todo_id,text,done FROM subtasks ORDER BY todo_id, position, id").fetchall(): subs.setdefault(r[1], []).append({"id": r[0], "text": r[2], "done": r[3]})
+    return [{"id": r[0], "text": r[1], "status": r[2], "at": int(r[3].timestamp()), "prio": r[4], "pos": r[5], "subs": subs.get(r[0], [])}
             for r in c.execute("SELECT id,text,status,status_at,prio,position FROM todos ORDER BY position, id").fetchall()]
+
+class SubIn(BaseModel): text: str | None = None; done: bool | None = None
+
+def add_sub(c, tid, text):
+    text = (text or "").strip()[:200]
+    if not text: raise HTTPException(400, "empty subtask")
+    if c.execute("SELECT 1 FROM todos WHERE id=%s", (tid,)).fetchone() is None: raise HTTPException(404, "no such to-do")
+    if c.execute("SELECT count(*) FROM subtasks WHERE todo_id=%s", (tid,)).fetchone()[0] >= 50: raise HTTPException(400, "at most 50 subtasks per to-do")
+    return c.execute("INSERT INTO subtasks(todo_id,text,position) VALUES (%s,%s,(SELECT coalesce(max(position),0)+1 FROM subtasks WHERE todo_id=%s)) RETURNING id", (tid, text, tid)).fetchone()[0]
+
+@app.post("/api/todo/{tid}/sub")
+def sub_add(tid: int, b: SubIn, req: Request):
+    need_auth(req)
+    with pool.connection() as c:
+        add_sub(c, tid, b.text); return {"todos": todo_list(c)}
+
+@app.post("/api/sub/{sid}")
+def sub_update(sid: int, b: SubIn, req: Request):
+    need_auth(req)
+    with pool.connection() as c:
+        if b.done is not None: c.execute("UPDATE subtasks SET done=%s WHERE id=%s", (b.done, sid))
+        if b.text is not None and b.text.strip(): c.execute("UPDATE subtasks SET text=%s WHERE id=%s", (b.text.strip()[:200], sid))
+        return {"todos": todo_list(c)}
+
+@app.delete("/api/sub/{sid}")
+def sub_delete(sid: int, req: Request):
+    need_auth(req)
+    with pool.connection() as c:
+        c.execute("DELETE FROM subtasks WHERE id=%s", (sid,)); return {"todos": todo_list(c)}
 
 class Todo(BaseModel): text: str | None = None; status: str | None = None; prio: int | None = None   # prio 0 = none
 
@@ -196,12 +230,14 @@ def todo_clear_done(req: Request):
         c.execute("DELETE FROM todos WHERE status='finished'"); return {"todos": todo_list(c)}
 
 # ---- to-do API for scripts / shortcuts (token made in Settings; see README)
-class TodoIn(BaseModel): text: str; status: str = "todo"; prio: int = 0
+class TodoIn(BaseModel): text: str; status: str = "todo"; prio: int = 0; subtasks: list[str] = []
 class TodoPatch(BaseModel): text: str | None = None; status: str | None = None; prio: int | None = None
 
 def todo_item(c, tid):
     r = c.execute("SELECT id,text,status,coalesce(prio,0) FROM todos WHERE id=%s", (tid,)).fetchone()
-    return {"id": r[0], "text": r[1], "status": r[2], "prio": r[3]} if r else None
+    if not r: return None
+    subs = [{"id": x[0], "text": x[1], "done": x[2]} for x in c.execute("SELECT id,text,done FROM subtasks WHERE todo_id=%s ORDER BY position, id", (tid,)).fetchall()]
+    return {"id": r[0], "text": r[1], "status": r[2], "prio": r[3], "subtasks": subs}
 
 @app.post("/api/apitoken")
 def api_token_make(req: Request):
@@ -227,7 +263,32 @@ def v1_add(req: Request, b: TodoIn | None = None, text: str | None = None, statu
     if not 0 <= pr <= 4: raise HTTPException(400, "prio must be 0 (none) to 4")
     with pool.connection() as c:
         tid = c.execute("INSERT INTO todos(text,status,done,prio,position) VALUES (%s,%s,%s,%s,(SELECT coalesce(max(position),0)+1 FROM todos)) RETURNING id", (t, st, st == "finished", pr or None)).fetchone()[0]
+        for x in (b.subtasks if b else [])[:50]:
+            if x.strip(): add_sub(c, tid, x)
         return todo_item(c, tid)
+
+@app.post("/api/v1/todos/{tid}/subtasks", status_code=201)
+def v1_add_sub(tid: int, b: SubIn, req: Request):
+    need_todo_api(req)
+    with pool.connection() as c:
+        add_sub(c, tid, b.text); return todo_item(c, tid)
+
+@app.patch("/api/v1/subtasks/{sid}")
+def v1_patch_sub(sid: int, b: SubIn, req: Request):
+    need_todo_api(req)
+    with pool.connection() as c:
+        r = c.execute("SELECT todo_id FROM subtasks WHERE id=%s", (sid,)).fetchone()
+        if not r: raise HTTPException(404, "no such subtask")
+        if b.done is not None: c.execute("UPDATE subtasks SET done=%s WHERE id=%s", (b.done, sid))
+        if b.text is not None and b.text.strip(): c.execute("UPDATE subtasks SET text=%s WHERE id=%s", (b.text.strip()[:200], sid))
+        return todo_item(c, r[0])
+
+@app.delete("/api/v1/subtasks/{sid}")
+def v1_delete_sub(sid: int, req: Request):
+    need_todo_api(req)
+    with pool.connection() as c:
+        if not c.execute("DELETE FROM subtasks WHERE id=%s RETURNING id", (sid,)).fetchone(): raise HTTPException(404, "no such subtask")
+    return {"ok": True}
 
 @app.get("/api/v1/todos")
 def v1_list(req: Request, status: str | None = None):
@@ -235,7 +296,7 @@ def v1_list(req: Request, status: str | None = None):
     if status is not None and status not in TODO_STATUS: raise HTTPException(400, "status must be one of " + ", ".join(TODO_STATUS))
     with pool.connection() as c:
         rows = c.execute("SELECT id,text,status,coalesce(prio,0) FROM todos WHERE (%s::text IS NULL OR status=%s) ORDER BY (status='finished'), coalesce(prio,5), position, id", (status, status)).fetchall()
-    return [{"id": r[0], "text": r[1], "status": r[2], "prio": r[3]} for r in rows]
+        return [todo_item(c, r[0]) for r in rows]
 
 @app.patch("/api/v1/todos/{tid}")
 def v1_patch(tid: int, b: TodoPatch, req: Request):
@@ -688,9 +749,10 @@ def menubar(req: Request):
     with pool.connection() as c:
         ev = dict(c.execute("SELECT key,value FROM settings WHERE key IN ('ev_id','ev_kind','ev_at')").fetchall())
         # to-dos for the plugin: open ones P1 first, plus the 10 newest finished. The plugin keeps them as its offline copy and hides these lines.
-        td = c.execute("SELECT id,status,coalesce(prio,0),text FROM todos WHERE status<>'finished' ORDER BY coalesce(prio,5), position, id LIMIT 200").fetchall() \
-           + c.execute("SELECT id,status,coalesce(prio,0),text FROM todos WHERE status='finished' ORDER BY status_at DESC LIMIT 10").fetchall()
-    L += ["@@TODO@@\ts%d\t%s\t%d\t%s" % (i, st_, pr, " ".join(tx.split())) for i, st_, pr, tx in td]
+        cols = "id,status,coalesce(prio,0),text,(SELECT count(*) FROM subtasks s WHERE s.todo_id=todos.id),(SELECT count(*) FROM subtasks s WHERE s.todo_id=todos.id AND s.done)"
+        td = c.execute(f"SELECT {cols} FROM todos WHERE status<>'finished' ORDER BY coalesce(prio,5), position, id LIMIT 200").fetchall() \
+           + c.execute(f"SELECT {cols} FROM todos WHERE status='finished' ORDER BY status_at DESC LIMIT 10").fetchall()
+    L += ["@@TODO@@\ts%d\t%s\t%d\t%s%s" % (i, st_, pr, " ".join(tx.split()), f" ({dn}/{n})" if n else "") for i, st_, pr, tx, n, dn in td]   # subtask progress is display only
     age = max(0, (now - int(ev.get("ev_at", 0))) // 1000) if ev else 0
     return PlainTextResponse("\n".join(L) + "\n", headers={"X-Pomodoro-Event": f"{ev.get('ev_id', 0)}:{ev.get('ev_kind', '')}:{age}",
         "X-Pomodoro-Config": f"{st['focus_min']}:{st['short_min']}:{st['long_min']}:{st['long_every']}",   # for the offline timer

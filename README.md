@@ -10,4 +10,5 @@ curl -X POST -H "Authorization: Bearer <token>" "https://pomodoro.romijn.app/api
 curl -H "Authorization: Bearer <token>" "https://pomodoro.romijn.app/api/v1/todos?status=todo"                   # list
 curl -X PATCH  .../api/v1/todos/ID -d '{"status":"finished"}' ...      curl -X DELETE .../api/v1/todos/ID ...
 ```
+Subtasks: add `"subtasks":["step one","step two"]` to the POST body, or `POST /api/v1/todos/ID/subtasks {"text":"..."}`; `PATCH /api/v1/subtasks/SID {"done":true}`; `DELETE /api/v1/subtasks/SID`. Results contain `subtasks: [{id,text,done}]`.
 `X-API-Key: <token>` works instead of the Authorization header.

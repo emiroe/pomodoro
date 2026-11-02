@@ -245,3 +245,33 @@ def test_inprogress_status(c):
     assert f"s{t['id']}\tinprogress" in anon.get("/api/menubar", headers={"X-Timer-Key": key}).text      # reaches the plugin's copy
     assert "inprogress" in anon.get("/api/menubar", headers={"X-Timer-Key": key}).text and "In Progress" in main.PLUGIN
     c.delete(f"/api/todo/{t['id']}")
+
+def test_subtasks(c):
+    from fastapi.testclient import TestClient as TC
+    anon = TC(main.app, base_url="https://testserver"); c.post("/api/login", json={"password": os.environ["EDIT_PASSWORD"]})
+    t = c.post("/api/todo", json={"text": "Rotate SPN secrets"}).json()["todos"][-1]; tid = t["id"]; assert t["subs"] == []
+    assert anon.post(f"/api/todo/{tid}/sub", json={"text": "x"}).status_code == 401
+    assert c.post(f"/api/todo/{tid}/sub", json={"text": "  "}).status_code == 400 and c.post("/api/todo/999999/sub", json={"text": "x"}).status_code == 404
+    c.post(f"/api/todo/{tid}/sub", json={"text": "List expiring secrets"}); l = c.post(f"/api/todo/{tid}/sub", json={"text": "Create new secrets"}).json()["todos"]
+    subs = [x for x in l if x["id"] == tid][0]["subs"]; assert [x["text"] for x in subs] == ["List expiring secrets", "Create new secrets"] and not subs[0]["done"]
+    l = c.post(f"/api/sub/{subs[0]['id']}", json={"done": True}).json()["todos"]; assert [x for x in l if x["id"] == tid][0]["subs"][0]["done"] is True
+    assert anon.get("/api/state").json()["todos"] == []                                       # private like the rest
+    # the plugin's copy shows the progress, display only
+    key = re.search(r'KEY="([0-9a-f]+)"', c.post("/api/menubar/key").text).group(1)
+    assert any(l.endswith("Rotate SPN secrets (1/2)") for l in anon.get("/api/menubar", headers={"X-Timer-Key": key}).text.splitlines())
+    l = c.delete(f"/api/sub/{subs[1]['id']}").json()["todos"]; assert len([x for x in l if x["id"] == tid][0]["subs"]) == 1
+    # a to-do can have at most 50 subtasks
+    for i in range(49): c.post(f"/api/todo/{tid}/sub", json={"text": f"s{i}"})
+    assert c.post(f"/api/todo/{tid}/sub", json={"text": "one too many"}).status_code == 400
+    # API
+    tok = c.post("/api/apitoken").json()["token"]; h = {"Authorization": "Bearer " + tok}
+    item = anon.post("/api/v1/todos", headers=h, json={"text": "With steps", "subtasks": ["one", "two", " "]}).json(); assert [x["text"] for x in item["subtasks"]] == ["one", "two"]
+    item = anon.post(f"/api/v1/todos/{item['id']}/subtasks", headers=h, json={"text": "three"}).json(); assert len(item["subtasks"]) == 3
+    sid = item["subtasks"][0]["id"]; assert anon.patch(f"/api/v1/subtasks/{sid}", headers=h, json={"done": True}).json()["subtasks"][0]["done"] is True
+    assert anon.patch("/api/v1/subtasks/999999", headers=h, json={"done": True}).status_code == 404
+    assert any(x["id"] == item["id"] and len(x["subtasks"]) == 3 for x in anon.get("/api/v1/todos", headers=h).json())
+    assert anon.delete(f"/api/v1/subtasks/{sid}", headers=h).status_code == 200
+    # deleting the to-do deletes its subtasks
+    c.delete(f"/api/todo/{tid}"); c.delete(f"/api/todo/{item['id']}")
+    with main.pool.connection() as db: assert db.execute("SELECT count(*) FROM subtasks").fetchone()[0] == 0
+    c.delete("/api/apitoken")

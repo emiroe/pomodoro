@@ -64,11 +64,15 @@ form .row>*{flex:1 1 120px}
 .sess .d{font-variant-numeric:tabular-nums;font-weight:600}
 .set{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px}.set label{font-size:12px;color:var(--dim);display:flex;flex-direction:column;gap:3px}
 .pj{display:flex;align-items:center;gap:8px;margin-top:8px}.pj input[type=text]{flex:1}
-.td{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px;line-height:1.3;border-bottom:1px solid var(--line)}.td:last-child{border-bottom:0}
+.tw{border-bottom:1px solid var(--line)}.tw:last-child{border-bottom:0}.tw.drag{opacity:.55;background:var(--card2);border-radius:8px}
+.td{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px;line-height:1.3}
 .td input[type=checkbox]{width:15px;height:15px;flex:none;accent-color:var(--ok);margin:0}
 .td span{flex:1;min-width:0;overflow-wrap:anywhere}.td.done span{text-decoration:line-through;color:var(--dim)}
 .td .h{flex:none;cursor:grab;color:var(--dim);touch-action:none;user-select:none;-webkit-user-select:none;font-size:13px;line-height:1;letter-spacing:-2px;padding:2px 3px 2px 0}
-.td.drag{opacity:.55;background:var(--card2);border-radius:8px}
+.td .sb{flex:none;border:1px solid var(--line);border-radius:6px;font-size:10px;font-weight:600;min-width:24px;padding:1px 4px;color:var(--dim)}.td .sb.on{background:var(--card2);color:var(--txt)}
+.subs{padding:0 0 8px 28px}.sub{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:12px;line-height:1.3}.sub input[type=checkbox]{width:13px;height:13px;flex:none;accent-color:var(--ok);margin:0}
+.sub span{flex:1;min-width:0;overflow-wrap:anywhere}.sub.done span{text-decoration:line-through;color:var(--dim)}.sub button{border:0;background:none;color:var(--dim);font-size:11px;cursor:pointer;padding:0 4px}
+.subs .sa{width:100%;margin-top:3px;font-size:12px;padding:5px 8px}
 .td .pr1,.td .pr2,.td .pr3,.td .pr4,.td .pr0{flex:none;border:0;border-radius:6px;font:inherit;font-size:10px;font-weight:700;min-width:24px;padding:2px 4px;cursor:pointer;color:#fff}
 .td .pr1{background:#e5484d}.td .pr2{background:#f5a524}.td .pr3{background:#4f9dff}.td .pr4{background:#8b93a7}.td .pr0{background:none;color:var(--dim);border:1px dashed var(--line)}
 .td select{flex:none;max-width:62px;font-size:11px;padding:2px 3px;border-radius:8px;color:var(--dim)}
@@ -190,27 +194,32 @@ function streaks(by,t0,first){
  return{cur,best}}
 
 const TABS=[['todo','To Do'],['inprogress','In Progress'],['hold','On Hold'],['review','Review'],['finished','Finished']];
-let tdTab='todo';const tdLimit={};try{const v=localStorage.getItem('pmTodoTab');if(TABS.some(t=>t[0]==v))tdTab=v}catch(_){}
+let tdTab='todo';const tdLimit={},tdOpen=new Set();let tdRefocus=null;   // tdOpen = tasks whose subtasks are showntry{const v=localStorage.getItem('pmTodoTab');if(TABS.some(t=>t[0]==v))tdTab=v}catch(_){}
 function renderTodos(){const L=S.todos||[],n=k=>L.filter(t=>t.status==k).length;
  $('todoTabs').innerHTML=TABS.map(([k,l])=>`<button data-tab="${k}" class="${k==tdTab?'on':''}" style="flex:1 1 auto;padding:4px 3px;font-size:11px;white-space:nowrap">${l}${n(k)?`<sup style="font-size:9px;margin-left:2px;opacity:.8">${n(k)}</sup>`:''}</button>`).join('');
  $('todoClear').classList.toggle('hide',tdTab!='finished'||!n('finished'));$('todoForm').classList.toggle('hide',tdTab=='finished');
  const all=L.filter(t=>t.status==tdTab).sort((a,b)=>tdTab=='finished'?b.at-a.at:(a.prio||5)-(b.prio||5)||a.pos-b.pos||a.id-b.id),lim=tdLimit[tdTab]||10,items=all.slice(0,lim);   // 10 per tab, 'Load more' adds 10; sorted P1 first, no priority last, same priority = your drag order; Finished = newest finished first
- $('todoList').innerHTML=items.length?items.map(t=>`<div class="td${t.status=='finished'?' done':''}" data-id="${t.id}">${tdTab=='finished'?'':'<span class="h" data-drag="1" title="Drag to reorder (within the same priority)">⋮⋮</span>'}<input type="checkbox" data-t="${t.id}"${t.status=='finished'?' checked':''}><button class="pr${t.prio||0}" data-p="${t.id}" title="Priority (tap to change)">${t.prio?'P'+t.prio:'P'}</button><span class="tx">${esc(t.text)}</span>
-  <select data-mv="${t.id}" title="Move to…"><option value="">Move</option>${TABS.filter(x=>x[0]!=t.status).map(([k,l])=>`<option value="${k}">${l}</option>`).join('')}</select><button data-tx="${t.id}" title="Delete">✕</button></div>`).join(''):`<div style="color:var(--dim);font-size:12px">${tdTab=='finished'?'Nothing finished yet.':'Nothing here.'}</div>`;
+ $('todoList').innerHTML=items.length?items.map(t=>{const subs=t.subs||[],dn=subs.filter(x=>x.done).length,open=tdOpen.has(t.id);return `<div class="tw" data-id="${t.id}"><div class="td${t.status=='finished'?' done':''}">${tdTab=='finished'?'':'<span class="h" data-drag="1" title="Drag to reorder (within the same priority)">⋮⋮</span>'}<input type="checkbox" data-t="${t.id}"${t.status=='finished'?' checked':''}><button class="pr${t.prio||0}" data-p="${t.id}" title="Priority (tap to change)">${t.prio?'P'+t.prio:'P'}</button><span class="tx">${esc(t.text)}</span><button class="sb${open?' on':''}" data-sb="${t.id}" title="Subtasks">${subs.length?dn+'/'+subs.length:'+'}</button>
+  <select data-mv="${t.id}" title="Move to…"><option value="">Move</option>${TABS.filter(x=>x[0]!=t.status).map(([k,l])=>`<option value="${k}">${l}</option>`).join('')}</select><button data-tx="${t.id}" title="Delete">✕</button></div>${open?`<div class="subs">${subs.map(x=>`<div class="sub${x.done?' done':''}"><input type="checkbox" data-sc="${x.id}"${x.done?' checked':''}><span>${esc(x.text)}</span><button data-sx="${x.id}" title="Delete subtask">✕</button></div>`).join('')}<input class="sa" data-sa="${t.id}" placeholder="Add a subtask" maxlength="200" enterkeyhint="done"></div>`:''}</div>`}).join(''):`<div style="color:var(--dim);font-size:12px">${tdTab=='finished'?'Nothing finished yet.':'Nothing here.'}</div>`;
+ if(tdRefocus){const el=$('todoList').querySelector(`[data-sa="${tdRefocus}"]`);if(el)el.focus();tdRefocus=null}
  if(all.length>lim)$('todoList').insertAdjacentHTML('beforeend',`<div style="text-align:center;margin-top:8px"><button class="btn sm" data-more="1">Load more (${all.length-lim})</button></div>`)}
 async function todoCall(m,u,b){try{S.todos=(await api(m,u,b)).todos;renderTodos()}catch(e){toast(e.message)}}
 $('todoTabs').onclick=e=>{const k=e.target.dataset.tab;if(!k)return;tdTab=k;try{localStorage.setItem('pmTodoTab',k)}catch(_){}renderTodos()};
 $('todoForm').onsubmit=async e=>{e.preventDefault();const t=$('todoNew').value.trim();if(!t)return;$('todoNew').value='';await todoCall('POST','/api/todo',{text:t,status:tdTab})};
-$('todoList').onchange=e=>{const id=e.target.dataset.t,mv=e.target.dataset.mv;
+$('todoList').onchange=e=>{const id=e.target.dataset.t,mv=e.target.dataset.mv,sc=e.target.dataset.sc;if(sc)return todoCall('POST','/api/sub/'+sc,{done:e.target.checked});
  if(id)todoCall('POST','/api/todo/'+id,{status:e.target.checked?'finished':'todo'});else if(mv&&e.target.value)todoCall('POST','/api/todo/'+mv,{status:e.target.value})};
-$('todoList').onclick=e=>{const pid=e.target.dataset.p;if(pid){const t=S.todos.find(x=>x.id==pid);return todoCall('POST','/api/todo/'+pid,{prio:((t.prio||0)+1)%5})}   // none > P1 > P2 > P3 > P4 > none
+$('todoList').onclick=e=>{const sb=e.target.dataset.sb,sx=e.target.dataset.sx;
+ if(sb){const i=+sb;tdOpen.has(i)?tdOpen.delete(i):tdOpen.add(i);return renderTodos()}
+ if(sx)return todoCall('DELETE','/api/sub/'+sx);
+ const pid=e.target.dataset.p;if(pid){const t=S.todos.find(x=>x.id==pid);return todoCall('POST','/api/todo/'+pid,{prio:((t.prio||0)+1)%5})}   // none > P1 > P2 > P3 > P4 > none
  if(e.target.dataset.more){tdLimit[tdTab]=(tdLimit[tdTab]||10)+10;return renderTodos()}const id=e.target.dataset.tx;if(id)todoCall('DELETE','/api/todo/'+id)};
+$('todoList').addEventListener('keydown',e=>{const id=e.target.dataset&&e.target.dataset.sa;if(!id||e.key!=='Enter')return;e.preventDefault();const t=e.target.value.trim();if(!t)return;tdRefocus=id;todoCall('POST','/api/todo/'+id+'/sub',{text:t})});
 // drag to reorder (pointer events: works with a finger and a mouse)
 let drag=null;
-$('todoList').addEventListener('pointerdown',e=>{const h=e.target.closest('[data-drag]');if(!h)return;drag=h.closest('.td');drag.classList.add('drag');h.setPointerCapture(e.pointerId);e.preventDefault()});
-$('todoList').addEventListener('pointermove',e=>{if(!drag)return;const el=document.elementFromPoint(e.clientX,e.clientY),row=el&&el.closest&&el.closest('#todoList .td');
+$('todoList').addEventListener('pointerdown',e=>{const h=e.target.closest('[data-drag]');if(!h)return;drag=h.closest('.tw');drag.classList.add('drag');h.setPointerCapture(e.pointerId);e.preventDefault()});
+$('todoList').addEventListener('pointermove',e=>{if(!drag)return;const el=document.elementFromPoint(e.clientX,e.clientY),row=el&&el.closest&&el.closest('#todoList .tw');
  if(row&&row!==drag){const r=row.getBoundingClientRect();row.parentNode.insertBefore(drag,e.clientY<r.top+r.height/2?row:row.nextSibling)}});
-const endDrag=async()=>{if(!drag)return;const ids=[...$('todoList').querySelectorAll('.td')].map(r=>+r.dataset.id);drag.classList.remove('drag');drag=null;await todoCall('POST','/api/todos/order',{ids})};
+const endDrag=async()=>{if(!drag)return;const ids=[...$('todoList').querySelectorAll('.tw')].map(r=>+r.dataset.id);drag.classList.remove('drag');drag=null;await todoCall('POST','/api/todos/order',{ids})};
 $('todoList').addEventListener('pointerup',endDrag);$('todoList').addEventListener('pointercancel',endDrag);
 $('todoClear').onclick=()=>{if(confirm('Delete all finished to-dos?'))todoCall('DELETE','/api/todos/done')};
 
@@ -271,7 +280,7 @@ function renderApi(tok){const o=location.origin,T=tok||'YOUR_TOKEN',c='style="wo
  <div class="row" style="margin:6px 0"><button class="btn sm" id="apiNew">${S.api_token?'Make a new token':'Create token'}</button>${S.api_token?'<button class="btn sm" id="apiRevoke">Revoke token</button>':''}</div>
  Add a to-do (status todo|inprogress|hold|review|finished, prio 0-4):<code ${c}>curl -X POST ${o}/api/v1/todos -H "Authorization: Bearer ${T}" -H "Content-Type: application/json" -d '{"text":"Renew certificate","prio":2}'</code>
  Simplest form, e.g. for a Shortcut:<code ${c}>curl -X POST -H "Authorization: Bearer ${T}" "${o}/api/v1/todos?text=Buy%20milk"</code>
- Also: GET /api/v1/todos[?status=todo], PATCH /api/v1/todos/ID {"status":"finished"}, DELETE /api/v1/todos/ID.`;
+ Also: GET /api/v1/todos[?status=todo], PATCH /api/v1/todos/ID {"status":"finished"}, DELETE /api/v1/todos/ID. Subtasks: add "subtasks":["a","b"] to the POST body, or POST /api/v1/todos/ID/subtasks {"text":"…"}.`;
  $('apiNew').onclick=async()=>{if(S.api_token&&!confirm('Make a new token? The old one stops working.'))return;try{const r=await api('POST','/api/apitoken');S.api_token=true;renderApi(r.token)}catch(e){toast(e.message)}};
  if($('apiRevoke'))$('apiRevoke').onclick=async()=>{if(!confirm('Revoke the token? Anything using it stops working.'))return;try{await api('DELETE','/api/apitoken');S.api_token=false;renderApi(null)}catch(e){toast(e.message)}}}
 $('apiBtn').onclick=()=>{if($('apiHelp').classList.contains('hide'))renderApi(null);else $('apiHelp').classList.add('hide')};
