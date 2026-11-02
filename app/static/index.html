@@ -89,16 +89,12 @@ form .row>*{flex:1 1 120px}
 <div class="pj"><input type="text" id="npName" placeholder="New project" maxlength="60"><input type="color" id="npColor" value="#7c9cff"><button class="btn sm" id="npAdd">Add</button></div>
 <div class="row" style="margin-top:12px"><a class="btn sm" href="/api/export.csv" style="text-decoration:none">Export CSV</a></div></div>
 
-<div class="card hide" id="logCard"><h2 id="logTitle">Log work by hand</h2><form id="form" autocomplete="off"><div class="row">
-<input type="date" id="fday" required><input id="fdur" placeholder="45 or 1:30" inputmode="numeric" required>
-<select id="fproj"></select></div><div class="row" style="margin-top:8px"><input id="fnote" placeholder="Note" maxlength="300">
-<button class="btn pri" style="flex:0 0 auto">Save</button><button type="button" class="btn hide" id="fcancel" style="flex:0 0 auto">Cancel</button></div></form></div>
 
 <div class="card"><h2>Sessions</h2><div id="list"></div></div>
 </main><div class="toast hide" id="toast"></div>
 <script>
 const $=id=>document.getElementById(id);
-let S=null,T=null,offset=0,range=30,editId=null;
+let S=null,T=null,offset=0,range=30;
 const fmt=s=>{s=Math.round(s);return Math.floor(s/3600)+':'+String(Math.floor(s/60)%60).padStart(2,'0')+':'+String(s%60).padStart(2,'0')};
 const fmtm=s=>Math.floor(s/3600)+':'+String(Math.floor(s/60)%60).padStart(2,'0');
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -107,8 +103,6 @@ const fromIso=s=>{const[a,b,c]=s.split('-').map(Number);return new Date(a,b-1,c)
 function toast(m){const t=$('toast');t.textContent=m;t.classList.remove('hide');clearTimeout(toast.t);toast.t=setTimeout(()=>t.classList.add('hide'),2600)}
 async function api(m,u,b){const r=await fetch(u,{method:m,headers:b?{'Content-Type':'application/json'}:{},body:b?JSON.stringify(b):undefined});
  if(!r.ok){let e='';try{e=(await r.json()).detail}catch(_){}throw new Error(e||r.status)}return r.json()}
-function parseDur(s){s=s.trim();if(!s)return 0;const p=s.split(':').map(Number);if(p.some(isNaN))return 0;
- if(p.length==1)return Math.round(p[0]*60);if(p.length==2)return p[0]*3600+p[1]*60;return p[0]*3600+p[1]*60+p[2]}
 const pcolor=n=>(S.projects.find(p=>p.name==n)||{}).color||'#8b93a7';
 
 async function load(){S=await api('GET','/api/state');render();if(S.edit)await loadTimer();else{T=null}renderTimer()}
@@ -119,7 +113,7 @@ function projOptions(sel,val){sel.innerHTML='<option value="">No project</option
 
 function render(){
  $('auth').textContent=S.edit?'Log out':'Log in';
- for(const id of['gear','logCard'])$(id).classList.toggle('hide',!S.edit);$('timerCard').classList.toggle('hide',!S.edit);
+ $('gear').classList.toggle('hide',!S.edit);$('timerCard').classList.toggle('hide',!S.edit);
  if(!S.edit)$('setCard').classList.add('hide');
  const by={},focusBy={};let total=0,pomos=0;
  for(const s of S.sessions){by[s.day]=(by[s.day]||0)+s.seconds;total+=s.seconds;if(s.pomodoro){pomos++;focusBy[s.day]=(focusBy[s.day]||0)+1}}
@@ -157,9 +151,9 @@ function render(){
  let l='',lastD='';const dayTot=by;
  for(const s of S.sessions.slice(0,200)){
   if(s.day!=lastD){lastD=s.day;l+=`<div class="day">${fromIso(s.day).toLocaleDateString('en-GB',{weekday:'short',day:'numeric',month:'short',year:'numeric'})}<span>${fmt(dayTot[s.day])}</span></div>`}
-  l+=`<div class="sess"><i class="dot" style="background:${pcolor(s.project)}"></i><div class="m">${s.pomodoro?'🍅 ':''}${esc(s.project||'No project')}${s.note?`<small>${esc(s.note)}</small>`:''}</div><div class="d">${fmt(s.seconds)}</div>${S.edit?`<button class="btn sm" data-e="${s.id}">Edit</button><button class="btn sm" data-x="${s.id}">✕</button>`:''}</div>`}
+  l+=`<div class="sess"><i class="dot" style="background:${pcolor(s.project)}"></i><div class="m">${s.pomodoro?'🍅 ':''}${esc(s.project||'No project')}${s.note?`<small>${esc(s.note)}</small>`:''}</div><div class="d">${fmt(s.seconds)}</div>${S.edit?`<button class="btn sm" data-x="${s.id}">✕</button>`:''}</div>`}
  $('list').innerHTML=l||'<div style="color:var(--dim)">No sessions yet.</div>';
- if(S.edit){projOptions($('fproj'),$('fproj').value&&$('fproj').value!='__new'?$('fproj').value:'');if(!$('fday').value)$('fday').value=today;projOptions($('tproj'),T?T.project:'');renderSettings()}
+ if(S.edit){projOptions($('tproj'),T?T.project:'');renderSettings()}
 }
 
 function renderSettings(){const st=S.settings,f=[['focus_min','Focus (min)'],['short_min','Short break'],['long_min','Long break'],['long_every','Long break after'],['daily_goal','Daily goal (pomodoros)']];
@@ -201,15 +195,7 @@ $('tproj').onchange=async()=>{if($('tproj').value=='__new'){const n=(prompt('Pro
 $('tnote').onchange=()=>tcall('POST','/api/timer/label',label());
 
 // ---- form
-$('form').onsubmit=async e=>{e.preventDefault();const sec=parseDur($('fdur').value);if(!sec)return toast('Enter a time like 45 or 1:30');
- let p=$('fproj').value;if(p=='__new'){p=(prompt('Project name')||'').trim()}
- try{await api('POST','/api/session',{id:editId,day:$('fday').value,seconds:sec,project:p,note:$('fnote').value});toast('Saved');stopEdit();await load()}catch(e){toast(e.message)}};
-function stopEdit(){editId=null;$('fdur').value='';$('fnote').value='';$('logTitle').textContent='Log work by hand';$('fcancel').classList.add('hide')}
-$('fcancel').onclick=stopEdit;
-$('fproj').onchange=async()=>{if($('fproj').value=='__new'){const n=(prompt('Project name')||'').trim();if(n){await api('POST','/api/project',{name:n,color:'#7c9cff'});S=await api('GET','/api/state');render();$('fproj').value=n}else $('fproj').value=''}};
-$('list').onclick=async e=>{const x=e.target.dataset.x;if(x){if(confirm('Delete this session?')){await api('DELETE','/api/session/'+x);stopEdit();await load()}return}
- const id=e.target.dataset.e;if(!id)return;const s=S.sessions.find(v=>v.id==id);editId=s.id;
- $('fday').value=s.day;$('fdur').value=fmt(s.seconds);projOptions($('fproj'),s.project);$('fnote').value=s.note;$('logTitle').textContent='Edit session';$('fcancel').classList.remove('hide');$('logCard').scrollIntoView({behavior:'smooth'})};
+$('list').onclick=async e=>{const x=e.target.dataset.x;if(x){if(confirm('Delete this session?')){await api('DELETE','/api/session/'+x);await load()}return}};
 
 // ---- settings
 $('gear').onclick=()=>$('setCard').classList.toggle('hide');
