@@ -22,6 +22,7 @@ ALTER TABLE sessions ADD COLUMN IF NOT EXISTS ended_at timestamptz;   -- set for
 CREATE INDEX IF NOT EXISTS sessions_day ON sessions(day);
 CREATE TABLE IF NOT EXISTS todos (id serial PRIMARY KEY, text text NOT NULL, done boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now());
 ALTER TABLE todos ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'todo';
+ALTER TABLE todos ADD COLUMN IF NOT EXISTS status_at timestamptz NOT NULL DEFAULT now();   -- when it entered its current tab (Finished shows newest first)
 UPDATE todos SET status='finished' WHERE done AND status='todo';   -- before the tabs existed 'done' was the only state
 CREATE TABLE IF NOT EXISTS projects (name text PRIMARY KEY, color text NOT NULL DEFAULT '#7c9cff', position serial);
 CREATE TABLE IF NOT EXISTS settings (key text PRIMARY KEY, value text NOT NULL);
@@ -129,7 +130,7 @@ def state(req: Request):
 TODO_STATUS = ("todo", "hold", "review", "finished")
 
 def todo_list(c):
-    return [{"id": r[0], "text": r[1], "status": r[2]} for r in c.execute("SELECT id,text,status FROM todos ORDER BY id").fetchall()]
+    return [{"id": r[0], "text": r[1], "status": r[2], "at": int(r[3].timestamp())} for r in c.execute("SELECT id,text,status,status_at FROM todos ORDER BY id").fetchall()]
 
 class Todo(BaseModel): text: str | None = None; status: str | None = None
 
@@ -146,7 +147,7 @@ def todo_update(tid: int, b: Todo, req: Request):
     need_auth(req)
     if b.status is not None and b.status not in TODO_STATUS: raise HTTPException(400, "bad status")
     with pool.connection() as c:
-        if b.status is not None: c.execute("UPDATE todos SET status=%s, done=%s WHERE id=%s", (b.status, b.status == "finished", tid))
+        if b.status is not None: c.execute("UPDATE todos SET status=%s, done=%s, status_at=now() WHERE id=%s AND status<>%s", (b.status, b.status == "finished", tid, b.status))
         if b.text is not None and b.text.strip(): c.execute("UPDATE todos SET text=%s WHERE id=%s", (b.text.strip()[:200], tid))
         return {"todos": todo_list(c)}
 

@@ -161,3 +161,4 @@ def test_todos(c):
     assert anon.get("/api/state").json()["todos"] == []
     left = {t["id"]: t["status"] for t in c.delete("/api/todos/done").json()["todos"]}; assert a["id"] not in left and left[b["id"]] == "hold"   # only Finished is cleared
     assert b["id"] not in {t["id"] for t in c.delete(f"/api/todo/{b['id']}").json()["todos"]}
+    l = c.post("/api/todo", json={"text": "newer"}).json()["todos"][-1]; assert l["at"] > 0

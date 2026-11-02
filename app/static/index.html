@@ -184,19 +184,20 @@ function streaks(by,t0,first){
  return{cur,best}}
 
 const TABS=[['todo','To Do'],['hold','On Hold'],['review','Review'],['finished','Finished']];
-let tdTab='todo';try{const v=localStorage.getItem('pmTodoTab');if(TABS.some(t=>t[0]==v))tdTab=v}catch(_){}
+let tdTab='todo';const tdLimit={};try{const v=localStorage.getItem('pmTodoTab');if(TABS.some(t=>t[0]==v))tdTab=v}catch(_){}
 function renderTodos(){const L=S.todos||[],n=k=>L.filter(t=>t.status==k).length;
  $('todoTabs').innerHTML=TABS.map(([k,l])=>`<button data-tab="${k}" class="${k==tdTab?'on':''}" style="flex:1;padding:4px 2px;font-size:12px">${l}${n(k)?` ${n(k)}`:''}</button>`).join('');
  $('todoClear').classList.toggle('hide',tdTab!='finished'||!n('finished'));$('todoForm').classList.toggle('hide',tdTab=='finished');
- const items=L.filter(t=>t.status==tdTab);
+ const all=L.filter(t=>t.status==tdTab).sort((a,b)=>tdTab=='finished'?b.at-a.at:a.id-b.id),lim=tdLimit[tdTab]||10,items=all.slice(0,lim);   // 10 per tab, 'Load more' adds 10
  $('todoList').innerHTML=items.length?items.map(t=>`<div class="td${t.status=='finished'?' done':''}"><input type="checkbox" data-t="${t.id}"${t.status=='finished'?' checked':''}><span>${esc(t.text)}</span>
-  <select data-mv="${t.id}" title="Move to…"><option value="">Move…</option>${TABS.filter(x=>x[0]!=t.status).map(([k,l])=>`<option value="${k}">${l}</option>`).join('')}</select><button data-tx="${t.id}" title="Delete">✕</button></div>`).join(''):`<div style="color:var(--dim);font-size:12px">${tdTab=='finished'?'Nothing finished yet.':'Nothing here.'}</div>`}
+  <select data-mv="${t.id}" title="Move to…"><option value="">Move…</option>${TABS.filter(x=>x[0]!=t.status).map(([k,l])=>`<option value="${k}">${l}</option>`).join('')}</select><button data-tx="${t.id}" title="Delete">✕</button></div>`).join(''):`<div style="color:var(--dim);font-size:12px">${tdTab=='finished'?'Nothing finished yet.':'Nothing here.'}</div>`;
+ if(all.length>lim)$('todoList').insertAdjacentHTML('beforeend',`<div style="text-align:center;margin-top:8px"><button class="btn sm" data-more="1">Load more (${all.length-lim})</button></div>`)}
 async function todoCall(m,u,b){try{S.todos=(await api(m,u,b)).todos;renderTodos()}catch(e){toast(e.message)}}
 $('todoTabs').onclick=e=>{const k=e.target.dataset.tab;if(!k)return;tdTab=k;try{localStorage.setItem('pmTodoTab',k)}catch(_){}renderTodos()};
 $('todoForm').onsubmit=async e=>{e.preventDefault();const t=$('todoNew').value.trim();if(!t)return;$('todoNew').value='';await todoCall('POST','/api/todo',{text:t,status:tdTab})};
 $('todoList').onchange=e=>{const id=e.target.dataset.t,mv=e.target.dataset.mv;
  if(id)todoCall('POST','/api/todo/'+id,{status:e.target.checked?'finished':'todo'});else if(mv&&e.target.value)todoCall('POST','/api/todo/'+mv,{status:e.target.value})};
-$('todoList').onclick=e=>{const id=e.target.dataset.tx;if(id)todoCall('DELETE','/api/todo/'+id)};
+$('todoList').onclick=e=>{if(e.target.dataset.more){tdLimit[tdTab]=(tdLimit[tdTab]||10)+10;return renderTodos()}const id=e.target.dataset.tx;if(id)todoCall('DELETE','/api/todo/'+id)};
 $('todoClear').onclick=()=>{if(confirm('Delete all finished to-dos?'))todoCall('DELETE','/api/todos/done')};
 
 function renderSettings(){const st=S.settings,f=[['focus_min','Focus (min)'],['short_min','Short break'],['long_min','Long break'],['long_every','Long break after'],['daily_goal','Daily goal (pomodoros)']];
