@@ -244,7 +244,12 @@ def complete_if_due(c):
     s = timer_state(c)["timer"]
     if not s["start"]: return
     el = s["acc"] + now_ms() - s["start"]
-    if el >= s["dur"]: move_on(c, s["dur"] // 1000, s["start"] + (s["dur"] - s["acc"]))
+    if el >= s["dur"]:
+        move_on(c, s["dur"] // 1000, s["start"] + (s["dur"] - s["acc"]))
+        # natural end of a block = an 'event' the menu bar plugin turns into a notification (skip / log now / reset are not events)
+        n = int(c.execute("SELECT value FROM settings WHERE key='ev_id'").fetchone()[0]) + 1 if c.execute("SELECT 1 FROM settings WHERE key='ev_id'").fetchone() else 1
+        for k, v in (("ev_id", str(n)), ("ev_kind", "focus" if s["phase"] == "focus" else "break"), ("ev_at", str(now_ms()))):
+            c.execute("INSERT INTO settings VALUES (%s,%s) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", (k, v))
 
 async def ticker():
     # the server itself closes finished blocks (no browser needs to be open)
@@ -302,11 +307,24 @@ def timer_reset(req: Request):
         return dict(timer_state(c), logged=logged)
 
 # ---- menu bar plugin (SwiftBar / xbar on the Mac): the page downloads a tiny script holding a timer-only key; the server renders the menu.
-PLUGIN = """#!/bin/bash
+PLUGIN = r"""#!/bin/bash
 # <swiftbar.title>Pomodoro</swiftbar.title><xbar.title>Pomodoro</xbar.title>
 # Pomodoro timer in the menu bar. Refreshes every second (name: pomodoro.1s.sh). Key = timer controls only; revoke it in Pomodoro > Settings.
+# Shows a macOS notification (with a sound) when a pomodoro or a break ends by itself.
 URL="@BASE@"; KEY="@SECRET@"
-curl -fsS -m 3 -H "X-Timer-Key: $KEY" "$URL/api/menubar" | sed "s|@URL@|$URL|g;s|@KEY@|$KEY|g" || echo "🍅 ?"
+STATE="$HOME/Library/Caches/pomodoro-plugin.event"; HDR=$(mktemp)
+BODY=$(curl -fsS -m 3 -D "$HDR" -H "X-Timer-Key: $KEY" "$URL/api/menubar") || { echo "🍅 ?"; rm -f "$HDR"; exit 0; }
+EV=$(tr -d '\r' < "$HDR" | awk -F': ' 'tolower($1)=="x-pomodoro-event"{print $2}'); rm -f "$HDR"
+printf '%s\n' "$BODY" | sed "s|@URL@|$URL|g;s|@KEY@|$KEY|g"
+ID=${EV%%:*}; REST=${EV#*:}; KIND=${REST%%:*}; AGE=${REST#*:}; LAST=$(cat "$STATE" 2>/dev/null)
+if [ -n "$ID" ] && [ "$ID" != "$LAST" ]; then
+  echo "$ID" > "$STATE"
+  # first run only remembers the id; events older than 2 minutes (Mac was asleep) are not announced
+  if [ -n "$LAST" ] && [ "${AGE:-999}" -lt 120 ]; then
+    if [ "$KIND" = "focus" ]; then MSG="Pomodoro done. Time for a break."; else MSG="Break over. Back to work."; fi
+    osascript -e "display notification \"$MSG\" with title \"Pomodoro\" sound name \"Glass\"" >/dev/null 2>&1 &
+  fi
+fi
 """
 @app.post("/api/menubar/key")
 def menubar_key(req: Request):
@@ -341,7 +359,9 @@ def menubar(req: Request):
         L.append("Start as…")
         for n in projects: L.append("--" + menu_action(n.replace("|", "/"), "/api/timer/startp?project=" + urllib.parse.quote(n, safe="")))
     L += ["---", f"Today: {tp} / {st['daily_goal']} pomodoros · {ts // 3600}:{ts // 60 % 60:02d} worked", "Open Pomodoro | href=@URL@"]
-    return PlainTextResponse("\n".join(L) + "\n")
+    with pool.connection() as c: ev = dict(c.execute("SELECT key,value FROM settings WHERE key IN ('ev_id','ev_kind','ev_at')").fetchall())
+    age = max(0, (now - int(ev.get("ev_at", 0))) // 1000) if ev else 0
+    return PlainTextResponse("\n".join(L) + "\n", headers={"X-Pomodoro-Event": f"{ev.get('ev_id', 0)}:{ev.get('ev_kind', '')}:{age}"})
 
 @app.get("/api/export.csv")
 def export(req: Request):

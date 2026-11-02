@@ -107,3 +107,15 @@ def test_menubar(c):
     key2 = [l for l in c.post("/api/menubar/key").text.splitlines() if l.startswith("URL=")][0].split('KEY="')[1].rstrip('"')
     assert anon.get("/api/menubar", headers=h).status_code == 401 and anon.get("/api/menubar", headers={"X-Timer-Key": key2}).status_code == 200   # new key revokes the old
     c.delete("/api/timer")
+    # notification events: only the natural end of a block counts
+    def ev(): return anon.get("/api/menubar", headers={"X-Timer-Key": key2}).headers["x-pomodoro-event"]
+    e0 = ev(); assert e0.count(":") == 2
+    c.post("/api/timer/start", json={}); c.post("/api/timer/skip"); c.post("/api/timer/pause")
+    assert ev() == e0 or ev().split(":")[0] == e0.split(":")[0]                  # skip / pause: no event
+    c.delete("/api/timer"); c.post("/api/timer/start", json={})
+    with main.pool.connection() as db: db.execute("UPDATE timer SET start_ms=%s, acc_ms=0 WHERE id=1", (main.now_ms() - 26 * 60000,))
+    main.tick(); i1, kind, age = ev().split(":"); assert int(i1) == int(e0.split(":")[0]) + 1 and kind == "focus" and int(age) < 5
+    c.post("/api/timer/start", json={})
+    with main.pool.connection() as db: db.execute("UPDATE timer SET start_ms=%s, acc_ms=0 WHERE id=1", (main.now_ms() - 6 * 60000,))
+    main.tick(); i2, kind, _ = ev().split(":"); assert int(i2) == int(i1) + 1 and kind == "break"
+    c.delete("/api/timer")
