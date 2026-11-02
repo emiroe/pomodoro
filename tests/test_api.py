@@ -83,3 +83,27 @@ def test_password(c):
     assert TestClient(main.app, base_url="https://testserver").post("/api/login", json={"password": "Another123"}).status_code == 200
     with main.pool.connection() as db: db.execute("DELETE FROM settings WHERE key IN ('pw_hash','pw_ver')")   # recovery path: .env password works again
     assert TestClient(main.app, base_url="https://testserver").post("/api/login", json={"password": pw}).status_code == 200
+
+def test_menubar(c):
+    from fastapi.testclient import TestClient as TC
+    pw = os.environ["EDIT_PASSWORD"]; c.post("/api/login", json={"password": pw}); c.delete("/api/timer")
+    anon = TC(main.app, base_url="https://testserver")
+    assert anon.post("/api/menubar/key").status_code == 401 and anon.get("/api/menubar").status_code == 401
+    script = c.post("/api/menubar/key"); assert script.status_code == 200 and "pomodoro.1s.sh" in script.headers["content-disposition"]
+    key = [l for l in script.text.splitlines() if l.startswith("URL=")][0].split('KEY="')[1].rstrip('"')
+    h = {"X-Timer-Key": key}
+    assert anon.get("/api/menubar", headers={"X-Timer-Key": "bad"}).status_code == 401
+    m = anon.get("/api/menubar", headers=h).text
+    assert m.startswith("🍅 ") and "Start | bash=/usr/bin/curl" in m and "@KEY@" in m and "@URL@" in m
+    assert anon.post("/api/timer/start", headers=h, json={}).status_code == 200
+    assert anon.post("/api/timer/startp?project=Menu%20Bar", headers=h).status_code == 200
+    assert anon.get("/api/timer", headers=h).json()["timer"]["project"] == "Menu Bar"
+    assert "Pause | " in anon.get("/api/menubar", headers=h).text
+    assert anon.post("/api/timer/pause", headers=h).status_code == 200 and anon.get("/api/menubar", headers=h).text.startswith("⏸ ")
+    # the key can do nothing else
+    assert anon.delete("/api/timer", headers=h).status_code == 401 and anon.get("/api/state", headers=h).json()["edit"] is False
+    assert anon.post("/api/session", headers=h, json={"day": "2026-11-02", "seconds": 60}).status_code == 401
+    assert anon.post("/api/password", headers=h, json={"current": pw, "new": "Another123"}).status_code == 401
+    key2 = [l for l in c.post("/api/menubar/key").text.splitlines() if l.startswith("URL=")][0].split('KEY="')[1].rstrip('"')
+    assert anon.get("/api/menubar", headers=h).status_code == 401 and anon.get("/api/menubar", headers={"X-Timer-Key": key2}).status_code == 200   # new key revokes the old
+    c.delete("/api/timer")

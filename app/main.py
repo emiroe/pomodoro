@@ -1,4 +1,4 @@
-import asyncio, os, hmac, hashlib, time, datetime, csv, io
+import asyncio, secrets, urllib.parse, os, hmac, hashlib, time, datetime, csv, io
 from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
 from psycopg_pool import ConnectionPool
@@ -61,6 +61,13 @@ def authed(req: Request):
     return hmac.compare_digest(sig, sign(ts)) and time.time() - int(ts) < 90 * 86400
 def need_auth(req):
     if not authed(req): raise HTTPException(401, "login required")
+def need_timer(req):
+    # the timer endpoints also accept the menu bar plugin's key (header X-Timer-Key); it can do nothing else (no sessions, no settings, no Reset Day)
+    if authed(req): return
+    k = req.headers.get("x-timer-key", "")
+    with pool.connection() as c: r = c.execute("SELECT value FROM settings WHERE key='timer_key_hash'").fetchone()
+    if k and r and hmac.compare_digest(hashlib.sha256(k.encode()).hexdigest(), r[0]): return
+    raise HTTPException(401, "login required")
 def today(): return datetime.datetime.now(TZ).date()
 
 class Login(BaseModel): password: str
@@ -200,21 +207,25 @@ def move_on(c, log_seconds, end_ms):
 class TimerStart(BaseModel): project: str | None = None; note: str | None = None
 @app.get("/api/timer")
 def timer_get(req: Request):
-    need_auth(req)
+    need_timer(req)
     with pool.connection() as c: return timer_state(c)
 
 @app.post("/api/timer/start")
 def timer_start(b: TimerStart, req: Request):
-    need_auth(req)
+    need_timer(req)
     with pool.connection() as c:
         timer_state(c)
         if b.project is not None: c.execute("UPDATE timer SET project=%s,note=%s WHERE id=1", (ensure_project(c, b.project), (b.note or "")[:300]))
         c.execute("UPDATE timer SET start_ms=%s, day=COALESCE(day,%s) WHERE id=1 AND start_ms=0", (now_ms(), today()))
         return timer_state(c)
 
+@app.post("/api/timer/startp")
+def timer_startp(project: str, req: Request):
+    return timer_start(TimerStart(project=project, note=""), req)
+
 @app.post("/api/timer/pause")
 def timer_pause(req: Request):
-    need_auth(req)
+    need_timer(req)
     with pool.connection() as c:
         timer_state(c)
         c.execute("UPDATE timer SET acc_ms=acc_ms+%s-start_ms, start_ms=0 WHERE id=1 AND start_ms<>0", (now_ms(),))
@@ -247,7 +258,7 @@ def tick():
 
 @app.post("/api/timer/complete")
 def timer_complete(req: Request):
-    need_auth(req)
+    need_timer(req)
     with pool.connection() as c:
         complete_if_due(c)
         return timer_state(c)
@@ -255,7 +266,7 @@ def timer_complete(req: Request):
 @app.post("/api/timer/finish")
 def timer_finish(req: Request):
     # 'Log it now': stop a focus block early and log the time done so far (needs at least 1 minute)
-    need_auth(req)
+    need_timer(req)
     with pool.connection() as c:
         s = timer_state(c)["timer"]
         el = s["acc"] + (now_ms() - s["start"] if s["start"] else 0)
@@ -266,7 +277,7 @@ def timer_finish(req: Request):
 @app.post("/api/timer/skip")
 def timer_skip(req: Request):
     # skip a break (or drop a focus block without logging it)
-    need_auth(req)
+    need_timer(req)
     with pool.connection() as c:
         s = timer_state(c)["timer"]
         if s["phase"] == "focus":
@@ -289,6 +300,48 @@ def timer_reset(req: Request):
                 c.execute("INSERT INTO sessions(day,seconds,project,note,pomodoro) VALUES (%s,%s,%s,%s,false)", (r[5] or today(), logged, r[3], r[4]))
         c.execute("DELETE FROM timer WHERE id=1")
         return dict(timer_state(c), logged=logged)
+
+# ---- menu bar plugin (SwiftBar / xbar on the Mac): the page downloads a tiny script holding a timer-only key; the server renders the menu.
+PLUGIN = """#!/bin/bash
+# <swiftbar.title>Pomodoro</swiftbar.title><xbar.title>Pomodoro</xbar.title>
+# Pomodoro timer in the menu bar. Refreshes every second (name: pomodoro.1s.sh). Key = timer controls only; revoke it in Pomodoro > Settings.
+URL="@BASE@"; KEY="@SECRET@"
+curl -fsS -m 3 -H "X-Timer-Key: $KEY" "$URL/api/menubar" | sed "s|@URL@|$URL|g;s|@KEY@|$KEY|g" || echo "🍅 ?"
+"""
+@app.post("/api/menubar/key")
+def menubar_key(req: Request):
+    need_auth(req)   # a new key replaces (revokes) the old one
+    key = secrets.token_hex(24)
+    with pool.connection() as c:
+        c.execute("INSERT INTO settings VALUES ('timer_key_hash',%s) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", (hashlib.sha256(key.encode()).hexdigest(),))
+    body = PLUGIN.replace("@BASE@", str(req.base_url).rstrip("/")).replace("@SECRET@", key)
+    return PlainTextResponse(body, headers={"Content-Disposition": "attachment; filename=pomodoro.1s.sh"})
+
+def menu_action(label, path, extra=""):
+    return f"{label} | bash=/usr/bin/curl param1=-fsS param2=-X param3=POST param4=-H param5=X-Timer-Key:@KEY@ param6=@URL@{path} terminal=false refresh=true{extra}"
+
+@app.get("/api/menubar")
+def menubar(req: Request):
+    need_timer(req)
+    with pool.connection() as c:
+        complete_if_due(c)
+        t = timer_state(c); s = t["timer"]; now = t["now"]; st = get_settings(c)
+        projects = [r[0] for r in c.execute("SELECT name FROM projects ORDER BY position").fetchall()]
+        tp, ts = c.execute("SELECT count(*) FILTER (WHERE pomodoro), coalesce(sum(seconds),0) FROM sessions WHERE day=%s", (today(),)).fetchone()
+    rem = max(0, s["dur"] - (s["acc"] + (now - s["start"] if s["start"] else 0)))
+    sec = -(-rem // 1000); clock = "%02d:%02d" % (sec // 60, sec % 60)
+    brk = s["phase"] != "focus"; running = bool(s["start"]); started = running or s["acc"] > 0
+    icon = ("☕" if brk else "🍅") if running or not started else "⏸"
+    L = [f"{icon} {clock}", "---", ("Break" if s["phase"] == "short" else "Long break" if s["phase"] == "long" else "Focus") + (f" · {s['project']}" if s["project"] and not brk else "")]
+    L.append(menu_action("Pause", "/api/timer/pause") if running else menu_action("Resume" if started else "Start", "/api/timer/start"))
+    if not brk and started and s["acc"] + (now - s["start"] if s["start"] else 0) >= 60000: L.append(menu_action("Log now", "/api/timer/finish"))
+    if brk: L.append(menu_action("Skip break", "/api/timer/skip"))
+    elif started: L.append(menu_action("Reset Pomodoro", "/api/timer/skip"))
+    if projects and not started and not brk:
+        L.append("Start as…")
+        for n in projects: L.append("--" + menu_action(n.replace("|", "/"), "/api/timer/startp?project=" + urllib.parse.quote(n, safe="")))
+    L += ["---", f"Today: {tp} / {st['daily_goal']} pomodoros · {ts // 3600}:{ts // 60 % 60:02d} worked", "Open Pomodoro | href=@URL@"]
+    return PlainTextResponse("\n".join(L) + "\n")
 
 @app.get("/api/export.csv")
 def export(req: Request):
