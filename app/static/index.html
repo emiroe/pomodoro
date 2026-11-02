@@ -110,7 +110,9 @@ async function api(m,u,b){const r=await fetch(u,{method:m,headers:b?{'Content-Ty
  if(!r.ok){let e='';try{e=(await r.json()).detail}catch(_){}throw new Error(e||r.status)}return r.json()}
 const pcolor=n=>(S.projects.find(p=>p.name==n)||{}).color||'#8b93a7';
 
-async function load(){S=await api('GET','/api/state');render();if(S.edit)await loadTimer();else{T=null}renderTimer()}
+async function load(){S=await api('GET','/api/state');render();if(S.edit){await loadTimer();syncLabel()}else{T=null}renderTimer()}
+// project + note live on the SERVER (timer row): show them on every device, but never overwrite what is being typed right now
+function syncLabel(){if(!T)return;projOptions($('tproj'),T.project);if(document.activeElement!==$('tnote'))$('tnote').value=T.note||''}
 async function loadTimer(){const r=await api('GET','/api/timer');T=r.timer;offset=r.now-Date.now()}
 
 function projOptions(sel,val){sel.innerHTML='<option value="">No project</option>'+S.projects.map(p=>`<option>${esc(p.name)}</option>`).join('')+'<option value="__new">+ New project…</option>';
@@ -208,7 +210,9 @@ $('skip').onclick=async()=>{if(T.phase=='focus'&&(T.acc||T.start)&&!confirm('Res
 $('reset').onclick=async()=>{if(!confirm('Reset the day? Time done on the current block is logged, then the timer starts again at pomodoro 1.'))return;const r=await tcall('DELETE','/api/timer');if(r){S=await api('GET','/api/state');render();if(r.logged)toast('Logged '+fmt(r.logged)+' on '+S.sessions[0].day);}};
 $('tproj').onchange=async()=>{if($('tproj').value=='__new'){const n=(prompt('Project name')||'').trim();if(n){await api('POST','/api/project',{name:n,color:'#7c9cff'});S=await api('GET','/api/state');render();$('tproj').value=n}else $('tproj').value=T.project}
  await tcall('POST','/api/timer/label',label())};
-$('tnote').onchange=()=>tcall('POST','/api/timer/label',label());
+let noteT=null;const saveLabel=()=>{clearTimeout(noteT);noteT=null;return tcall('POST','/api/timer/label',label())};
+$('tnote').oninput=()=>{clearTimeout(noteT);noteT=setTimeout(saveLabel,500)};   // saved while typing, not only when leaving the box
+$('tnote').onchange=saveLabel;
 
 // ---- form
 $('list').onclick=async e=>{if(e.target.dataset.more){weeks++;return render()}const x=e.target.dataset.x;if(x){if(confirm('Delete this session?')){await api('DELETE','/api/session/'+x);await load()}return}};

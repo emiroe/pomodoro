@@ -217,13 +217,14 @@ def timer_start(b: TimerStart, req: Request):
     need_timer(req)
     with pool.connection() as c:
         timer_state(c)
-        if b.project is not None: c.execute("UPDATE timer SET project=%s,note=%s WHERE id=1", (ensure_project(c, b.project), (b.note or "")[:300]))
+        if b.project is not None: c.execute("UPDATE timer SET project=%s WHERE id=1", (ensure_project(c, b.project),))
+        if b.note is not None: c.execute("UPDATE timer SET note=%s WHERE id=1", (b.note[:300],))   # note=None (menu bar 'Start as…') keeps the note typed in the app
         c.execute("UPDATE timer SET start_ms=%s, day=COALESCE(day,%s) WHERE id=1 AND start_ms=0", (now_ms(), today()))
         return timer_state(c)
 
 @app.post("/api/timer/startp")
 def timer_startp(project: str, req: Request):
-    return timer_start(TimerStart(project=project, note=""), req)
+    return timer_start(TimerStart(project=project), req)
 
 @app.post("/api/timer/pause")
 def timer_pause(req: Request):

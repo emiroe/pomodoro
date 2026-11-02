@@ -135,3 +135,15 @@ def test_offline_upload(c):
     assert len(row) == 1 and row[0]["pomodoro"] and row[0]["seconds"] == 1500 and len(row[0]["end"]) == 5
     assert "Office" in [p["name"] for p in c.get("/api/state").json()["projects"]]
     hdr = anon.get("/api/menubar", headers=h).headers; assert hdr["x-pomodoro-config"].count(":") == 3 and "Office" in hdr["x-pomodoro-projects"]
+
+def test_project_and_note_are_kept_server_side(c):
+    c.post("/api/login", json={"password": os.environ["EDIT_PASSWORD"]}); c.delete("/api/timer")
+    c.post("/api/timer/label", json={"project": "Documentation", "note": "SPN secret inventory"})
+    t = c.get("/api/timer").json()["timer"]; assert (t["project"], t["note"]) == ("Documentation", "SPN secret inventory")
+    c.post("/api/timer/startp?project=Learning")                                    # menu bar 'Start as…' changes the project, keeps the note
+    t = c.get("/api/timer").json()["timer"]; assert (t["project"], t["note"]) == ("Learning", "SPN secret inventory")
+    with main.pool.connection() as db: db.execute("UPDATE timer SET start_ms=%s, acc_ms=0 WHERE id=1", (main.now_ms() - 26 * 60000,))
+    main.tick()                                                                     # the server closes the block with no browser open
+    row = [x for x in c.get("/api/state").json()["sessions"] if x["project"] == "Learning"][0]; assert (row["note"], row["pomodoro"]) == ("SPN secret inventory", True)
+    t = c.get("/api/timer").json()["timer"]; assert (t["project"], t["note"]) == ("Learning", "SPN secret inventory")   # the next block keeps the label
+    c.delete("/api/timer")
