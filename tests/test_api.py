@@ -1,4 +1,4 @@
-import os, sys, time
+import os, re, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 os.chdir(os.path.join(os.path.dirname(__file__), "..", "app"))
 from fastapi.testclient import TestClient
@@ -90,7 +90,7 @@ def test_menubar(c):
     anon = TC(main.app, base_url="https://testserver")
     assert anon.post("/api/menubar/key").status_code == 401 and anon.get("/api/menubar").status_code == 401
     script = c.post("/api/menubar/key"); assert script.status_code == 200 and "pomodoro.1s.sh" in script.headers["content-disposition"]
-    key = [l for l in script.text.splitlines() if l.startswith("URL=")][0].split('KEY="')[1].rstrip('"')
+    key = re.search(r'KEY="([0-9a-f]+)"', script.text).group(1)
     h = {"X-Timer-Key": key}
     assert anon.get("/api/menubar", headers={"X-Timer-Key": "bad"}).status_code == 401
     m = anon.get("/api/menubar", headers=h).text
@@ -104,7 +104,7 @@ def test_menubar(c):
     assert anon.delete("/api/timer", headers=h).status_code == 401 and anon.get("/api/state", headers=h).json()["edit"] is False
     assert anon.post("/api/session", headers=h, json={"day": "2026-11-02", "seconds": 60}).status_code == 401
     assert anon.post("/api/password", headers=h, json={"current": pw, "new": "Another123"}).status_code == 401
-    key2 = [l for l in c.post("/api/menubar/key").text.splitlines() if l.startswith("URL=")][0].split('KEY="')[1].rstrip('"')
+    key2 = re.search(r'KEY="([0-9a-f]+)"', c.post("/api/menubar/key").text).group(1)
     assert anon.get("/api/menubar", headers=h).status_code == 401 and anon.get("/api/menubar", headers={"X-Timer-Key": key2}).status_code == 200   # new key revokes the old
     c.delete("/api/timer")
     # notification events: only the natural end of a block counts
@@ -119,3 +119,19 @@ def test_menubar(c):
     with main.pool.connection() as db: db.execute("UPDATE timer SET start_ms=%s, acc_ms=0 WHERE id=1", (main.now_ms() - 6 * 60000,))
     main.tick(); i2, kind, _ = ev().split(":"); assert int(i2) == int(i1) + 1 and kind == "break"
     c.delete("/api/timer")
+
+def test_offline_upload(c):
+    from fastapi.testclient import TestClient as TC
+    c.post("/api/login", json={"password": os.environ["EDIT_PASSWORD"]})
+    anon = TC(main.app, base_url="https://testserver")
+    key = re.search(r'KEY="([0-9a-f]+)"', c.post("/api/menubar/key").text).group(1); h = {"X-Timer-Key": key}
+    end = int(time.time()) - 3600
+    body = {"sessions": [{"id": "t1-%d" % end, "end": end, "seconds": 1500, "project": "Office"}, {"id": "bad", "end": end, "seconds": 0},
+                         {"id": "old", "end": end - 90 * 86400, "seconds": 60}]}
+    assert anon.post("/api/timer/offline", json=body).status_code == 401
+    r = anon.post("/api/timer/offline", headers=h, json=body).json(); assert r == {"added": 1, "skipped": 2}
+    assert anon.post("/api/timer/offline", headers=h, json=body).json() == {"added": 0, "skipped": 2}      # same id again: nothing added
+    row = [x for x in c.get("/api/state").json()["sessions"] if x["project"] == "Office"]
+    assert len(row) == 1 and row[0]["pomodoro"] and row[0]["seconds"] == 1500 and len(row[0]["end"]) == 5
+    assert "Office" in [p["name"] for p in c.get("/api/state").json()["projects"]]
+    hdr = anon.get("/api/menubar", headers=h).headers; assert hdr["x-pomodoro-config"].count(":") == 3 and "Office" in hdr["x-pomodoro-projects"]

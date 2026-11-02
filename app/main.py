@@ -16,6 +16,8 @@ pool = ConnectionPool(DB, min_size=1, max_size=5, open=False)
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (id serial PRIMARY KEY, day date NOT NULL, seconds int NOT NULL CHECK (seconds > 0 AND seconds <= 86400),
   project text NOT NULL DEFAULT '', note text NOT NULL DEFAULT '', pomodoro boolean NOT NULL DEFAULT false, updated_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS client_id text;   -- id given by the offline menu bar plugin, makes its upload idempotent
+CREATE UNIQUE INDEX IF NOT EXISTS sessions_client_id ON sessions(client_id) WHERE client_id IS NOT NULL;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS ended_at timestamptz;   -- set for timer sessions (start = ended_at - seconds); NULL for manual/Reset Day ones
 CREATE INDEX IF NOT EXISTS sessions_day ON sessions(day);
 CREATE TABLE IF NOT EXISTS projects (name text PRIMARY KEY, color text NOT NULL DEFAULT '#7c9cff', position serial);
@@ -309,22 +311,97 @@ def timer_reset(req: Request):
 # ---- menu bar plugin (SwiftBar / xbar on the Mac): the page downloads a tiny script holding a timer-only key; the server renders the menu.
 PLUGIN = r"""#!/bin/bash
 # <swiftbar.title>Pomodoro</swiftbar.title><xbar.title>Pomodoro</xbar.title>
-# Pomodoro timer in the menu bar. Refreshes every second (name: pomodoro.1s.sh). Key = timer controls only; revoke it in Pomodoro > Settings.
-# Shows a macOS notification (with a sound) when a pomodoro or a break ends by itself.
-URL="@BASE@"; KEY="@SECRET@"
-STATE="$HOME/Library/Caches/pomodoro-plugin.event"; HDR=$(mktemp)
-BODY=$(curl -fsS -m 3 -D "$HDR" -H "X-Timer-Key: $KEY" "$URL/api/menubar") || { echo "🍅 ?"; rm -f "$HDR"; exit 0; }
-EV=$(tr -d '\r' < "$HDR" | awk -F': ' 'tolower($1)=="x-pomodoro-event"{print $2}'); rm -f "$HDR"
-printf '%s\n' "$BODY" | sed "s|@URL@|$URL|g;s|@KEY@|$KEY|g"
-ID=${EV%%:*}; REST=${EV#*:}; KIND=${REST%%:*}; AGE=${REST#*:}; LAST=$(cat "$STATE" 2>/dev/null)
-if [ -n "$ID" ] && [ "$ID" != "$LAST" ]; then
-  echo "$ID" > "$STATE"
-  # first run only remembers the id; events older than 2 minutes (Mac was asleep) are not announced
-  if [ -n "$LAST" ] && [ "${AGE:-999}" -lt 120 ]; then
-    if [ "$KIND" = "focus" ]; then MSG="Pomodoro done. Time for a break."; else MSG="Break over. Back to work."; fi
-    osascript -e "display notification \"$MSG\" with title \"Pomodoro\" sound name \"Glass\"" >/dev/null 2>&1 &
+# Pomodoro timer in the menu bar. Refreshes every second (name: pomodoro.1s.sh). The key can only control the timer and upload finished
+# pomodoros; revoke it in Pomodoro > Settings. Notification + sound when a pomodoro or break ends.
+# OFFLINE: when the site cannot be reached (e.g. at the office) this script runs its own timer, keeps every finished pomodoro in a queue
+# on this Mac and uploads the queue by itself as soon as the site is reachable again. Data: ~/Library/Application Support/pomodoro-offline
+URL="@BASE@"; KEY="@SECRET@"; SELF="$0"
+D="$HOME/Library/Application Support/pomodoro-offline"; mkdir -p "$D"
+STATE="$D/state"; QUEUE="$D/queue"; CONF="$D/config"; PROJ="$D/projects"; EVF="$HOME/Library/Caches/pomodoro-plugin.event"
+NOW=$(date +%s)
+notify(){ osascript -e "display notification \"$1\" with title \"Pomodoro\" sound name \"Glass\"" >/dev/null 2>&1 & }
+clean(){ printf '%s' "$1" | tr -d "\"'\\\\\`\$\t\r\n" | cut -c1-60; }
+FOCUS=25; SHORT=5; LONG=15; EVERY=4
+[ -f "$CONF" ] && IFS=: read FOCUS SHORT LONG EVERY < "$CONF"
+PHASE=focus; DUR=0; ACC=0; START=0; PROJECT=""; CYCLE=0
+[ -f "$STATE" ] && . "$STATE"
+save(){ printf "PHASE=%s\nDUR=%s\nACC=%s\nSTART=%s\nPROJECT='%s'\nCYCLE=%s\n" "$PHASE" "$DUR" "$ACC" "$START" "$PROJECT" "$CYCLE" > "$STATE"; }
+phase_secs(){ case "$1" in focus) echo $((FOCUS*60));; short) echo $((SHORT*60));; *) echo $((LONG*60));; esac; }
+[ "$DUR" -gt 0 ] 2>/dev/null || DUR=$(phase_secs "$PHASE")
+active(){ [ -f "$STATE" ] && { [ "$START" -gt 0 ] || [ "$ACC" -gt 0 ]; }; }
+
+# ---- actions of the offline menu (this script calls itself)
+case "$1" in
+  startas) PROJECT=$(clean "$2"); START=0; shift; set -- start;;
+esac
+case "$1" in
+  start)  [ "$START" -eq 0 ] && START=$NOW; save; exit 0;;
+  pause)  [ "$START" -gt 0 ] && { ACC=$((ACC + NOW - START)); START=0; save; }; exit 0;;
+  skip)   if [ "$PHASE" = focus ]; then ACC=0; START=0; else PHASE=focus; ACC=0; START=0; DUR=$((FOCUS*60)); fi; save; exit 0;;
+  reset)  rm -f "$STATE"; exit 0;;
+esac
+
+# ---- upload the queue (only while nothing else is uploading)
+flush(){
+  [ -s "$QUEUE" ] || return 0
+  mkdir "$D/lock" 2>/dev/null || return 0
+  mv "$QUEUE" "$QUEUE.sending"
+  JSON=$(awk -F'\t' 'BEGIN{printf "{\"sessions\":["} {printf "%s{\"id\":\"%s\",\"end\":%s,\"seconds\":%s,\"project\":\"%s\"}", (NR>1?",":""), $4, $1, $2, $3} END{printf "]}"}' "$QUEUE.sending")
+  if curl -fsS -m 15 -X POST -H "X-Timer-Key: $KEY" -H "Content-Type: application/json" -d "$JSON" "$URL/api/timer/offline" >/dev/null 2>&1; then rm -f "$QUEUE.sending"
+  else cat "$QUEUE.sending" >> "$QUEUE"; rm -f "$QUEUE.sending"; fi
+  rmdir "$D/lock"
+}
+queued(){ [ -s "$QUEUE" ] && wc -l < "$QUEUE" | tr -d ' ' || echo 0; }
+
+# ---- offline timer
+offline_menu(){
+  if [ "$START" -gt 0 ] && [ $((ACC + NOW - START)) -ge "$DUR" ]; then   # a block ended by itself
+    END=$((START + DUR - ACC))
+    if [ "$PHASE" = focus ]; then
+      printf '%s\t%s\t%s\t%s\n' "$END" "$DUR" "$PROJECT" "$END-$DUR" >> "$QUEUE"; CYCLE=$((CYCLE+1))
+      if [ $((CYCLE % EVERY)) -eq 0 ]; then PHASE=long; else PHASE=short; fi; MSG="Pomodoro done. Time for a break."
+    else PHASE=focus; MSG="Break over. Back to work."; fi
+    DUR=$(phase_secs "$PHASE"); ACC=0; START=0; save
+    [ $((NOW - END)) -lt 120 ] && notify "$MSG"
   fi
-fi
+  EL=$ACC; [ "$START" -gt 0 ] && EL=$((ACC + NOW - START)); REM=$((DUR - EL)); [ "$REM" -lt 0 ] && REM=0
+  CLK=$(printf '%02d:%02d' $((REM/60)) $((REM%60)))
+  if [ "$PHASE" = focus ]; then ICON="🍅"; else ICON="☕"; fi; [ "$START" -eq 0 ] && [ "$ACC" -gt 0 ] && ICON="⏸"
+  echo "📴 $ICON $CLK"; echo "---"
+  echo "Offline: timer runs on this Mac, uploads when the site is reachable"
+  [ "$PHASE" = focus ] && [ -n "$PROJECT" ] && echo "Focus · $PROJECT"
+  A="terminal=false refresh=true"
+  if [ "$START" -gt 0 ]; then echo "Pause | bash=\"$SELF\" param1=pause $A"
+  else echo "$([ "$ACC" -gt 0 ] && echo Resume || echo Start) | bash=\"$SELF\" param1=start $A"; fi
+  if [ "$PHASE" = focus ]; then [ "$ACC" -gt 0 ] || [ "$START" -gt 0 ] && echo "Reset Pomodoro | bash=\"$SELF\" param1=skip $A"
+  else echo "Skip break | bash=\"$SELF\" param1=skip $A"; fi
+  if [ "$PHASE" = focus ] && [ "$ACC" -eq 0 ] && [ "$START" -eq 0 ] && [ -s "$PROJ" ]; then
+    echo "Start as…"
+    tr ',' '\n' < "$PROJ" | while read -r P; do N=$(printf '%b' "${P//%/\\x}"); echo "--$(clean "$N") | bash=\"$SELF\" param1=startas param2=\"$(clean "$N")\" $A"; done
+  fi
+  echo "---"; echo "Waiting to upload: $(queued) pomodoro(s)"
+}
+
+# ---- an unfinished local block keeps running locally until it is done (so nothing is lost when the site comes back mid-block)
+if active; then flush; offline_menu; exit 0; fi
+
+HDR=$(mktemp)
+if BODY=$(curl -fsS -m 3 -D "$HDR" -H "X-Timer-Key: $KEY" "$URL/api/menubar" 2>/dev/null); then
+  hv(){ tr -d '\r' < "$HDR" | awk -F': ' -v k="$1" 'tolower($1)==k{print $2}'; }
+  EV=$(hv x-pomodoro-event); C=$(hv x-pomodoro-config); P=$(hv x-pomodoro-projects); rm -f "$HDR"
+  [ -n "$C" ] && echo "$C" > "$CONF"; [ -n "$P" ] && echo "$P" > "$PROJ"
+  printf '%s\n' "$BODY" | sed "s|@URL@|$URL|g;s|@KEY@|$KEY|g"
+  [ -s "$QUEUE" ] && flush
+  [ -f "$STATE" ] && rm -f "$STATE"
+  ID=${EV%%:*}; REST=${EV#*:}; KIND=${REST%%:*}; AGE=${REST#*:}; LAST=$(cat "$EVF" 2>/dev/null)
+  if [ -n "$ID" ] && [ "$ID" != "$LAST" ]; then
+    echo "$ID" > "$EVF"
+    # first run only remembers the id; events older than 2 minutes (Mac was asleep) are not announced
+    if [ -n "$LAST" ] && [ "${AGE:-999}" -lt 120 ]; then
+      if [ "$KIND" = "focus" ]; then notify "Pomodoro done. Time for a break."; else notify "Break over. Back to work."; fi
+    fi
+  fi
+else rm -f "$HDR"; offline_menu; fi
 """
 @app.post("/api/menubar/key")
 def menubar_key(req: Request):
@@ -337,6 +414,23 @@ def menubar_key(req: Request):
 
 def menu_action(label, path, extra=""):
     return f"{label} | bash=/usr/bin/curl param1=-fsS param2=-X param3=POST param4=-H param5=X-Timer-Key:@KEY@ param6=@URL@{path} terminal=false refresh=true{extra}"
+
+class OfflineSession(BaseModel): id: str; end: int; seconds: int; project: str = ""
+class OfflineBatch(BaseModel): sessions: list[OfflineSession]
+
+@app.post("/api/timer/offline")
+def timer_offline(b: OfflineBatch, req: Request):
+    # pomodoros the menu bar plugin finished while it could not reach the site; uploading the same id twice adds nothing
+    need_timer(req)
+    added = skipped = 0; t = time.time()
+    with pool.connection() as c:
+        for x in b.sessions[:500]:
+            if not x.id or len(x.id) > 80 or not 1 <= x.seconds <= 86400 or not t - 45 * 86400 <= x.end <= t + 120: skipped += 1; continue
+            end = datetime.datetime.fromtimestamp(x.end, TZ)
+            r = c.execute("INSERT INTO sessions(day,seconds,project,pomodoro,ended_at,client_id) VALUES (%s,%s,%s,true,%s,%s) ON CONFLICT (client_id) WHERE client_id IS NOT NULL DO NOTHING RETURNING id",
+                          (end.date(), x.seconds, ensure_project(c, x.project), end, x.id)).fetchone()
+            added += 1 if r else 0
+    return {"added": added, "skipped": skipped}
 
 @app.get("/api/menubar")
 def menubar(req: Request):
@@ -361,7 +455,9 @@ def menubar(req: Request):
     L += ["---", f"Today: {tp} / {st['daily_goal']} pomodoros · {ts // 3600}:{ts // 60 % 60:02d} worked", "Open Pomodoro | href=@URL@"]
     with pool.connection() as c: ev = dict(c.execute("SELECT key,value FROM settings WHERE key IN ('ev_id','ev_kind','ev_at')").fetchall())
     age = max(0, (now - int(ev.get("ev_at", 0))) // 1000) if ev else 0
-    return PlainTextResponse("\n".join(L) + "\n", headers={"X-Pomodoro-Event": f"{ev.get('ev_id', 0)}:{ev.get('ev_kind', '')}:{age}"})
+    return PlainTextResponse("\n".join(L) + "\n", headers={"X-Pomodoro-Event": f"{ev.get('ev_id', 0)}:{ev.get('ev_kind', '')}:{age}",
+        "X-Pomodoro-Config": f"{st['focus_min']}:{st['short_min']}:{st['long_min']}:{st['long_every']}",   # for the offline timer
+        "X-Pomodoro-Projects": ",".join(urllib.parse.quote(n, safe="") for n in projects)})
 
 @app.get("/api/export.csv")
 def export(req: Request):
