@@ -155,14 +155,13 @@ function render(){
  if(S.edit){projOptions($('tproj'),T?T.project:'');renderSettings()}
 }
 
-// Streaks only count the days he works (Mon, Wed, Thu, Fri); Tuesday and the weekend neither add to nor break a streak.
+// Streaks: any day with work counts. Only a missed work day (Mon, Wed, Thu, Fri) breaks a streak; a free day (Tue, Sat, Sun) without work is skipped.
 const WORK=[1,3,4,5];
 function streaks(by,t0,first){
- const step=x=>{do x.setDate(x.getDate()-1);while(!WORK.includes(x.getDay()));return x};
  let best=0,run=0;const x=new Date(first);
- while(x<=t0){if(WORK.includes(x.getDay())){if(by[iso(x)]){run++;best=Math.max(best,run)}else if(iso(x)!=iso(t0))run=0}x.setDate(x.getDate()+1)}
- let cur=0;const d=new Date(t0);if(!WORK.includes(d.getDay())||!by[iso(d)])step(d);
- while(by[iso(d)]){cur++;step(d)}
+ while(x<=t0){if(by[iso(x)]){run++;best=Math.max(best,run)}else if(WORK.includes(x.getDay())&&iso(x)!=iso(t0))run=0;x.setDate(x.getDate()+1)}
+ let cur=0;const d=new Date(t0);if(!by[iso(d)])d.setDate(d.getDate()-1);   // today without work yet does not break it
+ while(d>=first){if(by[iso(d)])cur++;else if(WORK.includes(d.getDay()))break;d.setDate(d.getDate()-1)}
  return{cur,best}}
 
 function renderSettings(){const st=S.settings,f=[['focus_min','Focus (min)'],['short_min','Short break'],['long_min','Long break'],['long_every','Long break after'],['daily_goal','Daily goal (pomodoros)']];
