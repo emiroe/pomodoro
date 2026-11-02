@@ -32,6 +32,8 @@ UPDATE todos SET position = id WHERE position IS NULL;
 CREATE TABLE IF NOT EXISTS subtasks (id serial PRIMARY KEY, todo_id int NOT NULL REFERENCES todos(id) ON DELETE CASCADE, text text NOT NULL,
   done boolean NOT NULL DEFAULT false, position int NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS subtasks_todo ON subtasks(todo_id);
+ALTER TABLE subtasks ADD COLUMN IF NOT EXISTS client_id text;   -- ref given by the menu bar plugin (idempotent sync)
+CREATE UNIQUE INDEX IF NOT EXISTS subtasks_client_id ON subtasks(client_id) WHERE client_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS projects (name text PRIMARY KEY, color text NOT NULL DEFAULT '#7c9cff', position serial);
 CREATE TABLE IF NOT EXISTS settings (key text PRIMARY KEY, value text NOT NULL);
 INSERT INTO settings VALUES ('focus_min','25'),('short_min','5'),('long_min','15'),('long_every','4'),('daily_goal','8') ON CONFLICT DO NOTHING;
@@ -511,13 +513,14 @@ PLUGIN = r"""#!/bin/bash
 # Pomodoro timer + to-do list in the menu bar. Refreshes every second (name: pomodoro.1s.sh). The key can only control the timer,
 # upload finished pomodoros and sync to-dos; revoke it in Pomodoro > Settings. Notification + sound when a pomodoro or break ends.
 # OFFLINE: when the site cannot be reached (e.g. at the office) this script runs its own timer and works on its own copy of the to-do list.
-# Finished pomodoros and every to-do change (add, move to another tab, priority, delete) are kept on this Mac and uploaded by themselves
-# as soon as the site is reachable again. Data: ~/Library/Application Support/pomodoro-offline
+# Finished pomodoros and every to-do / subtask change are kept on this Mac and uploaded by themselves as soon as the site is reachable
+# again. Data: ~/Library/Application Support/pomodoro-offline
 URL="@BASE@"; KEY="@SECRET@"; SELF="$0"
 D="$HOME/Library/Application Support/pomodoro-offline"; mkdir -p "$D"
 STATE="$D/state"; QUEUE="$D/queue"; CONF="$D/config"; PROJ="$D/projects"; EVF="$HOME/Library/Caches/pomodoro-plugin.event"
-TODOS="$D/todos.tsv"; OPS="$D/todo-ops.tsv"; touch "$TODOS"
+TODOS="$D/todos.tsv"; SUBS="$D/subs.tsv"; OPS="$D/todo-ops.tsv"; touch "$TODOS" "$SUBS"
 NOW=$(date +%s)
+H=" size=11 color=#8e8e93"; A="terminal=false refresh=true"      # small grey section headers / flags every action needs
 notify(){ osascript -e "display notification \"$1\" with title \"Pomodoro\" sound name \"Glass\"" >/dev/null 2>&1 & }
 clean(){ printf '%s' "$1" | tr -d "\"'\\\\\`\$\t\r\n" | cut -c1-60; }
 line(){ printf '%s' "$1" | tr -d '"\\\r\n' | tr '\t' ' ' | cut -c1-200; }     # one plain line, safe inside the JSON we build
@@ -530,9 +533,11 @@ phase_secs(){ case "$1" in focus) echo $((FOCUS*60));; short) echo $((SHORT*60))
 [ "$DUR" -gt 0 ] 2>/dev/null || DUR=$(phase_secs "$PHASE")
 active(){ [ -f "$STATE" ] && { [ "$START" -gt 0 ] || [ "$ACC" -gt 0 ]; }; }
 
-# ---- to-dos: always shown from the local copy (todos.tsv: ref, status, prio, text); every change is applied there AND queued (todo-ops.tsv)
-todo_queue(){ printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "${3:--}" "${4:--}" "$NOW" "$5" >> "$OPS"; }   # op ref status prio time text
+# ---- to-dos: always shown from the local copy (todos.tsv: ref status prio text; subs.tsv: parent ref done text);
+# every change is applied there AND queued (todo-ops.tsv: op ref status prio time text parent)
+todo_queue(){ printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "${3:--}" "${4:--}" "$NOW" "$5" "${6:--}" >> "$OPS"; }
 todo_apply(){ awk -F'\t' -v OFS='\t' -v r="$1" -v f="$2" -v v="$3" '$1==r{ if(f=="status")$2=v; else $3=v } {print}' "$TODOS" > "$TODOS.tmp" && mv "$TODOS.tmp" "$TODOS"; }
+ask(){ osascript -e "text returned of (display dialog \"$1\" default answer \"\" with title \"Pomodoro\")" 2>/dev/null; }
 
 # ---- actions of the menus (this script calls itself)
 case "$1" in
@@ -544,14 +549,21 @@ case "$1" in
   skip)   if [ "$PHASE" = focus ]; then ACC=0; START=0; else PHASE=focus; ACC=0; START=0; DUR=$((FOCUS*60)); fi; save; exit 0;;
   reset)  rm -f "$STATE"; exit 0;;
   todoadd)
-    TXT=$(osascript -e 'text returned of (display dialog "New to-do" default answer "" with title "Pomodoro")' 2>/dev/null) || exit 0
-    TXT=$(line "$TXT"); [ -n "$TXT" ] || exit 0
+    TXT=$(ask "New to-do") || exit 0; TXT=$(line "$TXT"); [ -n "$TXT" ] || exit 0
     REF="c$NOW-$RANDOM"; todo_queue add "$REF" todo 0 "$TXT"; printf '%s\ttodo\t0\t%s\n' "$REF" "$TXT" >> "$TODOS"; exit 0;;
   todoset)   # todoset <ref> status|prio <value>
     if [ "$3" = status ]; then todo_queue set "$2" "$4" - ""; else todo_queue set "$2" - "$4" ""; fi
     todo_apply "$2" "$3" "$4"; exit 0;;
   tododel)
-    todo_queue del "$2" - - ""; awk -F'\t' -v r="$2" '$1!=r' "$TODOS" > "$TODOS.tmp" && mv "$TODOS.tmp" "$TODOS"; exit 0;;
+    todo_queue del "$2" - - ""; awk -F'\t' -v r="$2" '$1!=r' "$TODOS" > "$TODOS.tmp" && mv "$TODOS.tmp" "$TODOS"
+    awk -F'\t' -v r="$2" '$1!=r' "$SUBS" > "$SUBS.tmp" && mv "$SUBS.tmp" "$SUBS"; exit 0;;
+  subadd)    # subadd <parent ref>
+    TXT=$(ask "New subtask") || exit 0; TXT=$(line "$TXT"); [ -n "$TXT" ] || exit 0
+    REF="k$NOW-$RANDOM"; todo_queue sadd "$REF" - - "$TXT" "$2"; printf '%s\t%s\t0\t%s\n' "$2" "$REF" "$TXT" >> "$SUBS"; exit 0;;
+  subset)    # subset <sub ref> <0|1>
+    todo_queue sset "$2" "$3" - ""; awk -F'\t' -v OFS='\t' -v r="$2" -v v="$3" '$2==r{$3=v}{print}' "$SUBS" > "$SUBS.tmp" && mv "$SUBS.tmp" "$SUBS"; exit 0;;
+  subdel)
+    todo_queue sdel "$2" - - ""; awk -F'\t' -v r="$2" '$2!=r' "$SUBS" > "$SUBS.tmp" && mv "$SUBS.tmp" "$SUBS"; exit 0;;
 esac
 
 # ---- upload the queues (only while nothing else is uploading)
@@ -568,7 +580,12 @@ tflush(){
   [ -s "$OPS" ] || return 0
   mkdir "$D/tlock" 2>/dev/null || return 0
   mv "$OPS" "$OPS.sending"
-  JSON=$(awk -F'\t' 'BEGIN{printf "{\"ops\":["} {printf "%s{\"op\":\"%s\",\"ref\":\"%s\",\"t\":%s", (NR>1?",":""), $1, $2, $5; if($3!="-")printf ",\"status\":\"%s\"", $3; if($4!="-")printf ",\"prio\":%s", $4; if($6!="")printf ",\"text\":\"%s\"", $6; printf "}"} END{printf "]}"}' "$OPS.sending")
+  JSON=$(awk -F'\t' 'BEGIN{printf "{\"ops\":["} { printf "%s", (NR>1?",":"");
+    if($1=="sadd") printf "{\"op\":\"sadd\",\"ref\":\"%s\",\"parent\":\"%s\",\"text\":\"%s\",\"t\":%s}", $2, $7, $6, $5;
+    else if($1=="sset") printf "{\"op\":\"sset\",\"ref\":\"%s\",\"done\":%s,\"t\":%s}", $2, ($3=="1"?"true":"false"), $5;
+    else if($1=="sdel") printf "{\"op\":\"sdel\",\"ref\":\"%s\",\"t\":%s}", $2, $5;
+    else { printf "{\"op\":\"%s\",\"ref\":\"%s\",\"t\":%s", $1, $2, $5; if($3!="-")printf ",\"status\":\"%s\"", $3; if($4!="-")printf ",\"prio\":%s", $4; if($6!="")printf ",\"text\":\"%s\"", $6; printf "}" } }
+    END{printf "]}"}' "$OPS.sending")
   if curl -fsS -m 15 -X POST -H "X-Timer-Key: $KEY" -H "Content-Type: application/json" -d "$JSON" "$URL/api/todos/sync" >/dev/null 2>&1; then rm -f "$OPS.sending"
   else cat "$OPS.sending" >> "$OPS"; rm -f "$OPS.sending"; fi
   rmdir "$D/tlock"
@@ -576,33 +593,66 @@ tflush(){
 queued(){ [ -s "$QUEUE" ] && wc -l < "$QUEUE" | tr -d ' ' || echo 0; }
 tqueued(){ [ -s "$OPS" ] && wc -l < "$OPS" | tr -d ' ' || echo 0; }
 
-# ---- the to-do submenu (same online and offline)
-todo_menu(){
-  A="terminal=false refresh=true"
-  echo "---"; echo "To do ($(awk -F'\t' '$2!="finished"' "$TODOS" | wc -l | tr -d ' '))"
-  echo "--Add to-do… | bash=\"$SELF\" param1=todoadd $A"
-  for TAB in todo inprogress hold review finished; do
-    case $TAB in todo) LBL="To Do";; inprogress) LBL="In Progress";; hold) LBL="On Hold";; review) LBL="Review";; *) LBL="Finished";; esac
-    CNT=$(awk -F'\t' -v t="$TAB" '$2==t' "$TODOS" | wc -l | tr -d ' ')
-    echo "--$LBL ($CNT)"
-    awk -F'\t' -v OFS='\t' -v t="$TAB" '$2==t{k=($3>0?$3:5)*100000+NR; if(t=="finished")k=NR; print k,$0}' "$TODOS" | sort -n | head -12 | while IFS=$'\t' read -r K REF ST PR TX; do
-      [ -n "$REF" ] || continue
-      B="•"; [ "$PR" -gt 0 ] 2>/dev/null && B="P$PR"
-      echo "----$B $(printf '%s' "$TX" | tr '|' '/' | cut -c1-60)"
-      [ "$ST" != finished ] && echo "------✓ Finish | bash=\"$SELF\" param1=todoset param2=$REF param3=status param4=finished $A"
-      for S2 in todo inprogress hold review; do
-        [ "$S2" = "$ST" ] && continue
-        case $S2 in todo) N2="To Do";; inprogress) N2="In Progress";; hold) N2="On Hold";; *) N2="Review";; esac
-        echo "------Move to $N2 | bash=\"$SELF\" param1=todoset param2=$REF param3=status param4=$S2 $A"
-      done
-      for P in 1 2 3 4 0; do
-        [ "$P" = "$PR" ] && continue
-        echo "------Priority $([ "$P" = 0 ] && echo none || echo P$P) | bash=\"$SELF\" param1=todoset param2=$REF param3=prio param4=$P $A"
-      done
-      echo "------Delete | bash=\"$SELF\" param1=tododel param2=$REF $A"
-    done
-    [ "$CNT" -gt 12 ] && echo "----… $((CNT-12)) more (open Pomodoro) | href=$URL"
+# ---- the to-do list (same online and offline)
+tab_label(){ case "$1" in todo) echo "To Do";; inprogress) echo "In Progress";; hold) echo "On Hold";; review) echo "Review";; *) echo "Finished";; esac; }
+pico(){ case "$1" in 1) printf '🔴';; 2) printf '🟠';; 3) printf '🔵';; 4) printf '⚪';; *) printf '◦';; esac; }
+rows(){   # <tab> <limit>: that tab's tasks, P1 first (Finished keeps the server's newest-first order)
+  awk -F'\t' -v OFS='\t' -v t="$1" '$2==t{k=($3>0?$3:5)*100000+NR; if(t=="finished")k=NR; print k,$0}' "$TODOS" | sort -n | head -"$2"
+}
+# one task = a line (priority dot, text, subtask progress) with its own submenu: finish, subtasks, move, priority, delete
+task_entry(){   # <prefix> <ref> <status> <prio> <text>
+  local PF="$1" REF="$2" ST="$3" PR="$4" TX="$5" C="$1--" DN NN
+  read -r DN NN <<< "$(awk -F'\t' -v p="$REF" '$1==p{n++; if($3==1)d++} END{printf "%d %d", d, n}' "$SUBS")"
+  echo "${PF}$(pico "$PR") $(printf '%s' "$TX" | tr '|' '/' | cut -c1-44)$([ "$NN" -gt 0 ] && echo "   ▸ $DN/$NN")"
+  if [ "$ST" = finished ]; then echo "${C}↩ Reopen | bash=\"$SELF\" param1=todoset param2=$REF param3=status param4=todo $A sfimage=arrow.uturn.backward"
+  else echo "${C}Finish | bash=\"$SELF\" param1=todoset param2=$REF param3=status param4=finished $A sfimage=checkmark.circle"; fi
+  echo "${C}---"
+  echo "${C}Subtasks$([ "$NN" -gt 0 ] && echo " · $DN/$NN") |$H"
+  awk -F'\t' -v OFS='\t' -v p="$REF" '$1==p' "$SUBS" | while IFS=$'\t' read -r _P SR SD SX; do
+    [ -n "$SR" ] || continue
+    if [ "$SD" = 1 ]; then echo "${C}☑ $(printf '%s' "$SX" | tr '|' '/' | cut -c1-48) | bash=\"$SELF\" param1=subset param2=$SR param3=0 $A color=#8e8e93"
+    else echo "${C}☐ $(printf '%s' "$SX" | tr '|' '/' | cut -c1-48) | bash=\"$SELF\" param1=subset param2=$SR param3=1 $A"; fi
   done
+  echo "${C}Add subtask… | bash=\"$SELF\" param1=subadd param2=$REF $A sfimage=plus"
+  if [ "$NN" -gt 0 ]; then
+    echo "${C}Remove subtask"
+    awk -F'\t' -v p="$REF" '$1==p' "$SUBS" | while IFS=$'\t' read -r _P SR SD SX; do
+      [ -n "$SR" ] && echo "${C}--✕ $(printf '%s' "$SX" | tr '|' '/' | cut -c1-48) | bash=\"$SELF\" param1=subdel param2=$SR $A"
+    done
+  fi
+  echo "${C}---"
+  echo "${C}Move to"
+  for S2 in todo inprogress hold review finished; do
+    [ "$S2" = "$ST" ] || echo "${C}--$(tab_label "$S2") | bash=\"$SELF\" param1=todoset param2=$REF param3=status param4=$S2 $A"
+  done
+  echo "${C}Priority"
+  for P in 1 2 3 4 0; do
+    MARK="   "; [ "$P" = "$PR" ] && MARK="✓ "
+    echo "${C}--$MARK$(pico "$P") $([ "$P" = 0 ] && echo None || echo "P$P") | bash=\"$SELF\" param1=todoset param2=$REF param3=prio param4=$P $A"
+  done
+  echo "${C}---"
+  echo "${C}Delete task | bash=\"$SELF\" param1=tododel param2=$REF $A color=#e5484d sfimage=trash"
+}
+todo_section(){   # <tab> <limit>: tasks directly in the menu
+  local CNT; CNT=$(awk -F'\t' -v t="$1" '$2==t' "$TODOS" | wc -l | tr -d ' '); [ "$CNT" -gt 0 ] || return 0
+  echo "$(tab_label "$1") · $CNT |$H"
+  rows "$1" "$2" | while IFS=$'\t' read -r _K REF ST PR TX; do [ -n "$REF" ] && task_entry "" "$REF" "$ST" "$PR" "$TX"; done
+  [ "$CNT" -gt "$2" ] && echo "… $((CNT-$2)) more (open Pomodoro) | href=$URL"
+  return 0
+}
+todo_menu(){
+  local OPEN CNT TAB; OPEN=$(awk -F'\t' '$2!="finished"' "$TODOS" | wc -l | tr -d ' ')
+  echo "---"; echo "TO DO · $OPEN open |$H"
+  echo "Add to-do… | bash=\"$SELF\" param1=todoadd $A sfimage=plus.circle"
+  [ "$OPEN" -eq 0 ] && echo "Nothing open |$H"
+  todo_section inprogress 6; todo_section todo 8
+  for TAB in hold review finished; do
+    CNT=$(awk -F'\t' -v t="$TAB" '$2==t' "$TODOS" | wc -l | tr -d ' '); [ "$CNT" -gt 0 ] || continue
+    echo "$(tab_label "$TAB") ($CNT)"
+    rows "$TAB" 12 | while IFS=$'\t' read -r _K REF ST PR TX; do [ -n "$REF" ] && task_entry "--" "$REF" "$ST" "$PR" "$TX"; done
+    [ "$CNT" -gt 12 ] && echo "--… $((CNT-12)) more (open Pomodoro) | href=$URL"
+  done
+  return 0
 }
 
 # ---- offline timer
@@ -618,20 +668,18 @@ offline_menu(){
   fi
   EL=$ACC; [ "$START" -gt 0 ] && EL=$((ACC + NOW - START)); REM=$((DUR - EL)); [ "$REM" -lt 0 ] && REM=0
   CLK=$(printf '%02d:%02d' $((REM/60)) $((REM%60)))
-  if [ "$PHASE" = focus ]; then ICON="🍅"; else ICON="☕"; fi; [ "$START" -eq 0 ] && [ "$ACC" -gt 0 ] && ICON="⏸"
+  if [ "$PHASE" = focus ]; then ICON="🍅"; WHAT="FOCUS"; else ICON="☕"; WHAT="BREAK"; fi; [ "$START" -eq 0 ] && [ "$ACC" -gt 0 ] && ICON="⏸"
   echo "📴 $ICON $CLK"; echo "---"
-  echo "Offline: timer and to-dos work on this Mac and upload when the site is reachable"
-  [ "$PHASE" = focus ] && [ -n "$PROJECT" ] && echo "Focus · $PROJECT"
-  A="terminal=false refresh=true"
-  if [ "$START" -gt 0 ]; then echo "Pause | bash=\"$SELF\" param1=pause $A"
-  else echo "$([ "$ACC" -gt 0 ] && echo Resume || echo Start) | bash=\"$SELF\" param1=start $A"; fi
-  if [ "$PHASE" = focus ]; then [ "$ACC" -gt 0 ] || [ "$START" -gt 0 ] && echo "Reset Pomodoro | bash=\"$SELF\" param1=skip $A"
-  else echo "Skip break | bash=\"$SELF\" param1=skip $A"; fi
+  echo "$WHAT$([ "$PHASE" = focus ] && [ -n "$PROJECT" ] && echo " · $PROJECT") · OFFLINE |$H"
+  if [ "$START" -gt 0 ]; then echo "Pause | bash=\"$SELF\" param1=pause $A sfimage=pause.fill"
+  else echo "$([ "$ACC" -gt 0 ] && echo Resume || echo Start) | bash=\"$SELF\" param1=start $A sfimage=play.fill"; fi
+  if [ "$PHASE" = focus ]; then [ "$ACC" -gt 0 ] || [ "$START" -gt 0 ] && echo "Reset Pomodoro | bash=\"$SELF\" param1=skip $A sfimage=arrow.counterclockwise"
+  else echo "Skip break | bash=\"$SELF\" param1=skip $A sfimage=forward.end"; fi
   if [ "$PHASE" = focus ] && [ "$ACC" -eq 0 ] && [ "$START" -eq 0 ] && [ -s "$PROJ" ]; then
     echo "Start as…"
     tr ',' '\n' < "$PROJ" | while read -r P; do N=$(printf '%b' "${P//%/\\x}"); echo "--$(clean "$N") | bash=\"$SELF\" param1=startas param2=\"$(clean "$N")\" $A"; done
   fi
-  echo "---"; echo "Waiting to upload: $(queued) pomodoro(s), $(tqueued) to-do change(s)"
+  echo "---"; echo "Waiting to upload · $(queued) pomodoro(s) · $(tqueued) change(s) |$H"
   todo_menu
 }
 
@@ -644,8 +692,11 @@ if BODY=$(curl -fsS -m 3 -D "$HDR" -H "X-Timer-Key: $KEY" "$URL/api/menubar" 2>/
   EV=$(hv x-pomodoro-event); C=$(hv x-pomodoro-config); P=$(hv x-pomodoro-projects); rm -f "$HDR"
   [ -n "$C" ] && echo "$C" > "$CONF"; [ -n "$P" ] && echo "$P" > "$PROJ"
   # the server's to-do list replaces the local copy, but never while local changes are still waiting to be uploaded
-  [ -s "$OPS" ] || { printf '%s\n' "$BODY" | { grep '^@@TODO@@' || true; } | cut -f2- > "$TODOS.new"; mv "$TODOS.new" "$TODOS"; }
-  printf '%s\n' "$BODY" | { grep -v '^@@TODO@@' || true; } | sed "s|@URL@|$URL|g;s|@KEY@|$KEY|g"
+  if [ ! -s "$OPS" ]; then
+    printf '%s\n' "$BODY" | { grep '^@@TODO@@' || true; } | cut -f2- > "$TODOS.new"; mv "$TODOS.new" "$TODOS"
+    printf '%s\n' "$BODY" | { grep '^@@SUB@@' || true; } | cut -f2- > "$SUBS.new"; mv "$SUBS.new" "$SUBS"
+  fi
+  printf '%s\n' "$BODY" | { grep -v -e '^@@TODO@@' -e '^@@SUB@@' || true; } | sed "s|@URL@|$URL|g;s|@KEY@|$KEY|g"
   todo_menu
   [ -s "$QUEUE" ] && flush
   tflush
@@ -672,9 +723,19 @@ def menubar_key(req: Request):
 def menu_action(label, path, extra=""):
     return f"{label} | bash=/usr/bin/curl param1=-fsS param2=-X param3=POST param4=-H param5=X-Timer-Key:@KEY@ param6=@URL@{path} terminal=false refresh=true{extra}"
 
+HDR = " size=11 color=#8e8e93"   # small grey section header
+
 class TodoOp(BaseModel):
     op: str; ref: str; text: str | None = None; status: str | None = None; prio: int | None = None; t: int = 0   # t = when the change was made (epoch seconds)
+    parent: str | None = None; done: bool | None = None                                                       # subtasks: sadd (ref=k..., parent=s12|c...), sset (ref=u5|k..., done), sdel
 class TodoSync(BaseModel): ops: list[TodoOp]
+
+def sub_id(c, ref):
+    # ref 'u5' = server id 5, 'k...' = a subtask the plugin created offline
+    if ref[:1] == "u" and ref[1:].isdigit() and len(ref) < 12: r = c.execute("SELECT id FROM subtasks WHERE id=%s", (int(ref[1:]),)).fetchone()
+    elif ref[:1] == "k": r = c.execute("SELECT id FROM subtasks WHERE client_id=%s", (ref,)).fetchone()
+    else: r = None
+    return r[0] if r else None
 
 def todo_id(c, ref):
     # ref 's12' = server id 12, 'c...' = a to-do the plugin created offline
@@ -698,6 +759,19 @@ def todos_sync(b: TodoSync, req: Request):
                 r = c.execute("INSERT INTO todos(text,status,done,prio,client_id,position,status_at) VALUES (%s,%s,%s,%s,%s,(SELECT coalesce(max(position),0)+1 FROM todos),LEAST(to_timestamp(%s),now())) ON CONFLICT (client_id) WHERE client_id IS NOT NULL DO NOTHING RETURNING id",
                               (text, st or "todo", st == "finished", o.prio if o.prio and 1 <= o.prio <= 4 else None, o.ref, o.t or time.time())).fetchone()
                 done += 1 if r else 0
+                continue
+            if o.op in ("sadd", "sset", "sdel"):
+                if o.op == "sadd":
+                    pid, text = todo_id(c, o.parent or ""), (o.text or "").strip()[:200]
+                    if pid is None or not text or not o.ref.startswith("k") or len(o.ref) > 60 or c.execute("SELECT count(*) FROM subtasks WHERE todo_id=%s", (pid,)).fetchone()[0] >= 50: skipped += 1; continue
+                    r = c.execute("INSERT INTO subtasks(todo_id,text,position,client_id) VALUES (%s,%s,(SELECT coalesce(max(position),0)+1 FROM subtasks WHERE todo_id=%s),%s) ON CONFLICT (client_id) WHERE client_id IS NOT NULL DO NOTHING RETURNING id", (pid, text, pid, o.ref)).fetchone()
+                    done += 1 if r else 0
+                    continue
+                sid = sub_id(c, o.ref)
+                if sid is None: skipped += 1; continue
+                if o.op == "sdel": c.execute("DELETE FROM subtasks WHERE id=%s", (sid,))
+                elif o.done is not None: c.execute("UPDATE subtasks SET done=%s WHERE id=%s", (o.done, sid))
+                done += 1
                 continue
             tid = todo_id(c, o.ref)
             if tid is None: skipped += 1; continue
@@ -737,22 +811,24 @@ def menubar(req: Request):
     sec = -(-rem // 1000); clock = "%02d:%02d" % (sec // 60, sec % 60)
     brk = s["phase"] != "focus"; running = bool(s["start"]); started = running or s["acc"] > 0
     icon = ("☕" if brk else "🍅") if running or not started else "⏸"
-    L = [f"{icon} {clock}", "---", ("Break" if s["phase"] == "short" else "Long break" if s["phase"] == "long" else "Focus") + (f" · {s['project']}" if s["project"] and not brk else "")]
-    L.append(menu_action("Pause", "/api/timer/pause") if running else menu_action("Resume" if started else "Start", "/api/timer/start"))
-    if not brk and started and s["acc"] + (now - s["start"] if s["start"] else 0) >= 60000: L.append(menu_action("Log now", "/api/timer/finish"))
-    if brk: L.append(menu_action("Skip break", "/api/timer/skip"))
-    elif started: L.append(menu_action("Reset Pomodoro", "/api/timer/skip"))
+    what = "BREAK" if s["phase"] == "short" else "LONG BREAK" if s["phase"] == "long" else "FOCUS"
+    L = [f"{icon} {clock}", "---", f"{what}{' · ' + s['project'].replace('|', '/') if s['project'] and not brk else ''}{' · ' + s['note'].replace('|', '/')[:40] if s['note'] and not brk else ''} |{HDR}"]
+    L.append(menu_action("Pause", "/api/timer/pause", " sfimage=pause.fill") if running else menu_action("Resume" if started else "Start", "/api/timer/start", " sfimage=play.fill"))
+    if not brk and started and s["acc"] + (now - s["start"] if s["start"] else 0) >= 60000: L.append(menu_action("Log now", "/api/timer/finish", " sfimage=checkmark.circle"))
+    if brk: L.append(menu_action("Skip break", "/api/timer/skip", " sfimage=forward.end"))
+    elif started: L.append(menu_action("Reset Pomodoro", "/api/timer/skip", " sfimage=arrow.counterclockwise"))
     if projects and not started and not brk:
         L.append("Start as…")
         for n in projects: L.append("--" + menu_action(n.replace("|", "/"), "/api/timer/startp?project=" + urllib.parse.quote(n, safe="")))
-    L += ["---", f"Today: {tp} / {st['daily_goal']} pomodoros · {ts // 3600}:{ts // 60 % 60:02d} worked", "Open Pomodoro | href=@URL@"]
+    L += ["---", f"Today · {tp} / {st['daily_goal']} pomodoros · {ts // 3600}:{ts // 60 % 60:02d} worked |{HDR}", "Open Pomodoro | href=@URL@ sfimage=safari"]
     with pool.connection() as c:
         ev = dict(c.execute("SELECT key,value FROM settings WHERE key IN ('ev_id','ev_kind','ev_at')").fetchall())
-        # to-dos for the plugin: open ones P1 first, plus the 10 newest finished. The plugin keeps them as its offline copy and hides these lines.
-        cols = "id,status,coalesce(prio,0),text,(SELECT count(*) FROM subtasks s WHERE s.todo_id=todos.id),(SELECT count(*) FROM subtasks s WHERE s.todo_id=todos.id AND s.done)"
-        td = c.execute(f"SELECT {cols} FROM todos WHERE status<>'finished' ORDER BY coalesce(prio,5), position, id LIMIT 200").fetchall() \
-           + c.execute(f"SELECT {cols} FROM todos WHERE status='finished' ORDER BY status_at DESC LIMIT 10").fetchall()
-    L += ["@@TODO@@\ts%d\t%s\t%d\t%s%s" % (i, st_, pr, " ".join(tx.split()), f" ({dn}/{n})" if n else "") for i, st_, pr, tx, n, dn in td]   # subtask progress is display only
+        # to-dos + subtasks for the plugin: open ones P1 first, plus the 10 newest finished. The plugin keeps them as its offline copy and hides these lines.
+        td = c.execute("SELECT id,status,coalesce(prio,0),text FROM todos WHERE status<>'finished' ORDER BY coalesce(prio,5), position, id LIMIT 200").fetchall() \
+           + c.execute("SELECT id,status,coalesce(prio,0),text FROM todos WHERE status='finished' ORDER BY status_at DESC LIMIT 10").fetchall()
+        subs = c.execute("SELECT todo_id,id,done,text FROM subtasks WHERE todo_id = ANY(%s) ORDER BY todo_id, position, id", ([x[0] for x in td],)).fetchall()
+    L += ["@@TODO@@\ts%d\t%s\t%d\t%s" % (i, st_, pr, " ".join(tx.split())) for i, st_, pr, tx in td]
+    L += ["@@SUB@@\ts%d\tu%d\t%d\t%s" % (pid, sid, 1 if dn else 0, " ".join(tx.split())) for pid, sid, dn, tx in subs]
     age = max(0, (now - int(ev.get("ev_at", 0))) // 1000) if ev else 0
     return PlainTextResponse("\n".join(L) + "\n", headers={"X-Pomodoro-Event": f"{ev.get('ev_id', 0)}:{ev.get('ev_kind', '')}:{age}",
         "X-Pomodoro-Config": f"{st['focus_min']}:{st['short_min']}:{st['long_min']}:{st['long_every']}",   # for the offline timer

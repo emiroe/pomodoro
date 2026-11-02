@@ -258,7 +258,8 @@ def test_subtasks(c):
     assert anon.get("/api/state").json()["todos"] == []                                       # private like the rest
     # the plugin's copy shows the progress, display only
     key = re.search(r'KEY="([0-9a-f]+)"', c.post("/api/menubar/key").text).group(1)
-    assert any(l.endswith("Rotate SPN secrets (1/2)") for l in anon.get("/api/menubar", headers={"X-Timer-Key": key}).text.splitlines())
+    ml = anon.get("/api/menubar", headers={"X-Timer-Key": key}).text.splitlines()
+    assert any(l.endswith("\tRotate SPN secrets") for l in ml) and f"@@SUB@@\ts{tid}\tu{subs[0]['id']}\t1\tList expiring secrets" in ml and f"@@SUB@@\ts{tid}\tu{subs[1]['id']}\t0\tCreate new secrets" in ml
     l = c.delete(f"/api/sub/{subs[1]['id']}").json()["todos"]; assert len([x for x in l if x["id"] == tid][0]["subs"]) == 1
     # a to-do can have at most 50 subtasks
     for i in range(49): c.post(f"/api/todo/{tid}/sub", json={"text": f"s{i}"})
@@ -275,3 +276,25 @@ def test_subtasks(c):
     c.delete(f"/api/todo/{tid}"); c.delete(f"/api/todo/{item['id']}")
     with main.pool.connection() as db: assert db.execute("SELECT count(*) FROM subtasks").fetchone()[0] == 0
     c.delete("/api/apitoken")
+
+def test_subtask_sync_from_plugin(c):
+    from fastapi.testclient import TestClient as TC
+    anon = TC(main.app, base_url="https://testserver"); c.post("/api/login", json={"password": os.environ["EDIT_PASSWORD"]})
+    key = re.search(r'KEY="([0-9a-f]+)"', c.post("/api/menubar/key").text).group(1); h = {"X-Timer-Key": key}
+    tid = c.post("/api/todo", json={"text": "Parent"}).json()["todos"][-1]["id"]
+    sid = c.post(f"/api/todo/{tid}/sub", json={"text": "Existing step"}).json()["todos"][-1]["subs"][0]["id"]
+    now = int(time.time())
+    ops = [{"op": "add", "ref": "cP-1", "text": "Made offline", "t": now},
+           {"op": "sadd", "ref": "kA-1", "parent": "cP-1", "text": "Step on a to-do created offline", "t": now},      # parent created in the same batch
+           {"op": "sadd", "ref": "kA-2", "parent": f"s{tid}", "text": "Step added offline", "t": now},
+           {"op": "sset", "ref": f"u{sid}", "done": True, "t": now}, {"op": "sset", "ref": "kA-2", "done": True, "t": now},
+           {"op": "sadd", "ref": "kA-3", "parent": "s999999", "text": "orphan", "t": now}, {"op": "sset", "ref": "u999999", "done": True, "t": now}]
+    r = anon.post("/api/todos/sync", headers=h, json={"ops": ops}).json(); assert r["skipped"] == 2
+    st = {t["text"]: t for t in c.get("/api/state").json()["todos"]}
+    assert [(x["text"], x["done"]) for x in st["Parent"]["subs"]] == [("Existing step", True), ("Step added offline", True)]
+    assert [x["text"] for x in st["Made offline"]["subs"]] == ["Step on a to-do created offline"]
+    anon.post("/api/todos/sync", headers=h, json={"ops": ops})                                                          # again: nothing doubles
+    st = {t["text"]: t for t in c.get("/api/state").json()["todos"]}; assert len(st["Parent"]["subs"]) == 2 and len(st["Made offline"]["subs"]) == 1
+    anon.post("/api/todos/sync", headers=h, json={"ops": [{"op": "sdel", "ref": "kA-2", "t": now}, {"op": "sset", "ref": f"u{sid}", "done": False, "t": now}]})
+    st = {t["text"]: t for t in c.get("/api/state").json()["todos"]}; assert [(x["text"], x["done"]) for x in st["Parent"]["subs"]] == [("Existing step", False)]
+    for t in c.get("/api/state").json()["todos"]: c.delete(f"/api/todo/{t['id']}")
