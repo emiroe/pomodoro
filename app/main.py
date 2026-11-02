@@ -20,6 +20,7 @@ ALTER TABLE sessions ADD COLUMN IF NOT EXISTS client_id text;   -- id given by t
 CREATE UNIQUE INDEX IF NOT EXISTS sessions_client_id ON sessions(client_id) WHERE client_id IS NOT NULL;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS ended_at timestamptz;   -- set for timer sessions (start = ended_at - seconds); NULL for manual/Reset Day ones
 CREATE INDEX IF NOT EXISTS sessions_day ON sessions(day);
+CREATE TABLE IF NOT EXISTS todos (id serial PRIMARY KEY, text text NOT NULL, done boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS projects (name text PRIMARY KEY, color text NOT NULL DEFAULT '#7c9cff', position serial);
 CREATE TABLE IF NOT EXISTS settings (key text PRIMARY KEY, value text NOT NULL);
 INSERT INTO settings VALUES ('focus_min','25'),('short_min','5'),('long_min','15'),('long_every','4'),('daily_goal','8') ON CONFLICT DO NOTHING;
@@ -120,7 +121,41 @@ def state(req: Request):
         rows = c.execute("SELECT id,day,seconds,project,note,pomodoro,ended_at FROM sessions ORDER BY day DESC, ended_at DESC NULLS LAST, id DESC").fetchall()
         projects = [{"name": r[0], "color": r[1]} for r in c.execute("SELECT name,color FROM projects ORDER BY position").fetchall()]
         st = get_settings(c)
-    return {"edit": authed(req), "sessions": [srow(r) for r in rows], "projects": projects, "settings": st, "today": today().isoformat()}
+        todos = todo_list(c) if authed(req) else []      # the to-do list is private: only shown when logged in
+    return {"edit": authed(req), "sessions": [srow(r) for r in rows], "projects": projects, "settings": st, "today": today().isoformat(), "todos": todos}
+
+def todo_list(c):
+    return [{"id": r[0], "text": r[1], "done": r[2]} for r in c.execute("SELECT id,text,done FROM todos ORDER BY done, id").fetchall()]
+
+class Todo(BaseModel): text: str | None = None; done: bool | None = None
+
+@app.post("/api/todo")
+def todo_add(b: Todo, req: Request):
+    need_auth(req)
+    text = (b.text or "").strip()[:200]
+    if not text: raise HTTPException(400, "empty to-do")
+    with pool.connection() as c:
+        c.execute("INSERT INTO todos(text) VALUES (%s)", (text,)); return {"todos": todo_list(c)}
+
+@app.post("/api/todo/{tid}")
+def todo_update(tid: int, b: Todo, req: Request):
+    need_auth(req)
+    with pool.connection() as c:
+        if b.done is not None: c.execute("UPDATE todos SET done=%s WHERE id=%s", (b.done, tid))
+        if b.text is not None and b.text.strip(): c.execute("UPDATE todos SET text=%s WHERE id=%s", (b.text.strip()[:200], tid))
+        return {"todos": todo_list(c)}
+
+@app.delete("/api/todo/{tid}")
+def todo_delete(tid: int, req: Request):
+    need_auth(req)
+    with pool.connection() as c:
+        c.execute("DELETE FROM todos WHERE id=%s", (tid,)); return {"todos": todo_list(c)}
+
+@app.delete("/api/todos/done")
+def todo_clear_done(req: Request):
+    need_auth(req)
+    with pool.connection() as c:
+        c.execute("DELETE FROM todos WHERE done"); return {"todos": todo_list(c)}
 
 def check(b: Session):
     try: datetime.date.fromisoformat(b.day)

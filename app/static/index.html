@@ -64,6 +64,10 @@ form .row>*{flex:1 1 120px}
 .sess .d{font-variant-numeric:tabular-nums;font-weight:600}
 .set{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px}.set label{font-size:12px;color:var(--dim);display:flex;flex-direction:column;gap:3px}
 .pj{display:flex;align-items:center;gap:8px;margin-top:8px}.pj input[type=text]{flex:1}
+.td{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--line)}.td:last-child{border-bottom:0}
+.td input[type=checkbox]{width:19px;height:19px;flex:none;accent-color:var(--ok);margin:0}
+.td span{flex:1;min-width:0;overflow-wrap:anywhere}.td.done span{text-decoration:line-through;color:var(--dim)}
+.td button{border:0;background:none;color:var(--dim);font-size:15px;cursor:pointer;padding:2px 6px}
 .toast{position:fixed;left:12px;right:12px;bottom:calc(14px + env(safe-area-inset-bottom));z-index:50;padding:12px 14px;border-radius:14px;background:var(--txt);color:var(--bg);box-shadow:0 8px 30px rgba(0,0,0,.45);font-weight:600}
 .hide{display:none!important}
 @media(max-width:400px){h1{font-size:18px}.ring{width:116px;height:116px}.timer{font-size:26px}.tpanel{gap:12px;padding:12px}}
@@ -72,6 +76,8 @@ form .row>*{flex:1 1 120px}
 <div class="top"><h1>🍅 Pomodoro</h1><button class="btn ico" id="refresh" title="Reload">↻</button><button class="btn ico hide" id="gear" title="Settings">⚙</button><button class="btn" id="auth">Log in</button></div>
 
 <form class="card hide" id="login" autocomplete="on"><div class="row"><input type="password" id="pw" placeholder="Edit password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" required><button class="btn pri" style="flex:0 0 auto">Log in</button></div></form>
+<div class="card hide" id="todoCard"><h2>To do <button class="btn sm hide" id="todoClear" style="text-transform:none;letter-spacing:0">Clear done</button></h2>
+<div id="todoList"></div><form id="todoForm" autocomplete="off" style="margin-top:6px"><input id="todoNew" placeholder="Add a to-do" maxlength="200" enterkeyhint="done" style="width:100%"></form></div>
 <div class="card hide" id="timerCard"><div class="tpanel" id="tp"><div class="ring" id="ring"><div class="in"><div class="timer" id="clock">25:00</div><small id="phase">Focus</small></div></div>
 <div class="tside"><div class="dots" id="dots"></div>
 <select id="tproj"></select><input id="tnote" placeholder="What are you working on?" maxlength="300" enterkeyhint="done">
@@ -120,7 +126,7 @@ function projOptions(sel,val){sel.innerHTML='<option value="">No activity</optio
 
 function render(){
  $('auth').textContent=S.edit?'Log out':'Log in';
- $('gear').classList.toggle('hide',!S.edit);$('timerCard').classList.toggle('hide',!S.edit);
+ $('gear').classList.toggle('hide',!S.edit);$('timerCard').classList.toggle('hide',!S.edit);$('todoCard').classList.toggle('hide',!S.edit);renderTodos();
  if(!S.edit)$('setCard').classList.add('hide');
  const by={},focusBy={};let total=0,pomos=0;
  for(const s of S.sessions){by[s.day]=(by[s.day]||0)+s.seconds;total+=s.seconds;if(s.pomodoro){pomos++;focusBy[s.day]=(focusBy[s.day]||0)+1}}
@@ -173,6 +179,14 @@ function streaks(by,t0,first){
  let cur=0;const d=new Date(t0);if(!by[iso(d)])d.setDate(d.getDate()-1);   // today without work yet does not break it
  while(d>=first){if(by[iso(d)])cur++;else if(WORK.includes(d.getDay()))break;d.setDate(d.getDate()-1)}
  return{cur,best}}
+
+function renderTodos(){const L=S.todos||[];$('todoClear').classList.toggle('hide',!L.some(t=>t.done));
+ $('todoList').innerHTML=L.length?L.map(t=>`<div class="td${t.done?' done':''}"><input type="checkbox" data-t="${t.id}"${t.done?' checked':''}><span>${esc(t.text)}</span><button data-tx="${t.id}" title="Delete">✕</button></div>`).join(''):'<div style="color:var(--dim);font-size:13px">Nothing to do.</div>'}
+async function todoCall(m,u,b){try{S.todos=(await api(m,u,b)).todos;renderTodos()}catch(e){toast(e.message)}}
+$('todoForm').onsubmit=async e=>{e.preventDefault();const t=$('todoNew').value.trim();if(!t)return;$('todoNew').value='';await todoCall('POST','/api/todo',{text:t})};
+$('todoList').onchange=e=>{const id=e.target.dataset.t;if(id)todoCall('POST','/api/todo/'+id,{done:e.target.checked})};
+$('todoList').onclick=e=>{const id=e.target.dataset.tx;if(id)todoCall('DELETE','/api/todo/'+id)};
+$('todoClear').onclick=()=>todoCall('DELETE','/api/todos/done');
 
 function renderSettings(){const st=S.settings,f=[['focus_min','Focus (min)'],['short_min','Short break'],['long_min','Long break'],['long_every','Long break after'],['daily_goal','Daily goal (pomodoros)']];
  if(!$('setForm').dataset.k||$('setForm').dataset.k!=JSON.stringify(st)){$('setForm').dataset.k=JSON.stringify(st);
