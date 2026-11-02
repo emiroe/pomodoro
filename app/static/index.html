@@ -72,6 +72,7 @@ form .row>*{flex:1 1 120px}
 .td .sb{flex:none;border:1px solid var(--line);border-radius:6px;font-size:10px;font-weight:600;min-width:24px;padding:1px 4px;color:var(--dim)}.td .sb.on{background:var(--card2);color:var(--txt)}
 .subs{padding:0 0 8px 28px}.sub{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:12px;line-height:1.3}.sub input[type=checkbox]{width:13px;height:13px;flex:none;accent-color:var(--ok);margin:0}
 .sub span{flex:1;min-width:0;overflow-wrap:anywhere}.sub.done span{text-decoration:line-through;color:var(--dim)}.sub button{border:0;background:none;color:var(--dim);font-size:11px;cursor:pointer;padding:0 4px}
+.td .tx,.sub span{cursor:text}
 .subs .sa{width:100%;margin-top:3px;font-size:12px;padding:5px 8px}
 .td .pr1,.td .pr2,.td .pr3,.td .pr4,.td .pr0{flex:none;border:0;border-radius:6px;font:inherit;font-size:10px;font-weight:700;min-width:24px;padding:2px 4px;cursor:pointer;color:#fff}
 .td .pr1{background:#e5484d}.td .pr2{background:#f5a524}.td .pr3{background:#4f9dff}.td .pr4{background:#8b93a7}.td .pr0{background:none;color:var(--dim);border:1px dashed var(--line)}
@@ -208,7 +209,16 @@ $('todoTabs').onclick=e=>{const k=e.target.dataset.tab;if(!k)return;tdTab=k;try{
 $('todoForm').onsubmit=async e=>{e.preventDefault();const t=$('todoNew').value.trim();if(!t)return;$('todoNew').value='';await todoCall('POST','/api/todo',{text:t,status:tdTab})};
 $('todoList').onchange=e=>{const id=e.target.dataset.t,mv=e.target.dataset.mv,sc=e.target.dataset.sc;if(sc)return todoCall('POST','/api/sub/'+sc,{done:e.target.checked});
  if(id)todoCall('POST','/api/todo/'+id,{status:e.target.checked?'finished':'todo'});else if(mv&&e.target.value)todoCall('POST','/api/todo/'+mv,{status:e.target.value})};
-$('todoList').onclick=e=>{const sb=e.target.dataset.sb,sx=e.target.dataset.sx;
+// tap the text of a task or subtask to rename it: Enter or leaving the box saves, Esc cancels
+function editText(el,kind,id){if(el.querySelector('input'))return;const old=el.textContent;el.textContent='';
+ const i=document.createElement('input');i.value=old;i.maxLength=200;i.style.cssText='width:100%;font-size:inherit;padding:2px 6px';el.appendChild(i);i.focus();i.select();let done=false;
+ const finish=async save=>{if(done)return;done=true;const v=i.value.trim();if(save&&v&&v!==old)await todoCall('POST',(kind=='sub'?'/api/sub/':'/api/todo/')+id,{text:v});else renderTodos()};
+ i.onkeydown=ev=>{if(ev.key==='Enter'){ev.preventDefault();finish(true)}else if(ev.key==='Escape')finish(false)};i.onblur=()=>finish(true)}
+$('todoList').onclick=e=>{if(e.target.tagName==='INPUT')return;
+ const tx=e.target.closest('.tx'),sp=e.target.closest('.sub span');
+ if(tx)return editText(tx,'todo',tx.closest('.tw').dataset.id);
+ if(sp)return editText(sp,'sub',sp.parentNode.querySelector('[data-sc]').dataset.sc);
+ const sb=e.target.dataset.sb,sx=e.target.dataset.sx;
  if(sb){const i=+sb;tdOpen.has(i)?tdOpen.delete(i):tdOpen.add(i);return renderTodos()}
  if(sx)return todoCall('DELETE','/api/sub/'+sx);
  const pid=e.target.dataset.p;if(pid){const t=S.todos.find(x=>x.id==pid);return todoCall('POST','/api/todo/'+pid,{prio:((t.prio||0)+1)%5})}   // none > P1 > P2 > P3 > P4 > none

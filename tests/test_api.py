@@ -298,3 +298,19 @@ def test_subtask_sync_from_plugin(c):
     anon.post("/api/todos/sync", headers=h, json={"ops": [{"op": "sdel", "ref": "kA-2", "t": now}, {"op": "sset", "ref": f"u{sid}", "done": False, "t": now}]})
     st = {t["text"]: t for t in c.get("/api/state").json()["todos"]}; assert [(x["text"], x["done"]) for x in st["Parent"]["subs"]] == [("Existing step", False)]
     for t in c.get("/api/state").json()["todos"]: c.delete(f"/api/todo/{t['id']}")
+
+def test_editing_text(c):
+    from fastapi.testclient import TestClient as TC
+    anon = TC(main.app, base_url="https://testserver"); c.post("/api/login", json={"password": os.environ["EDIT_PASSWORD"]})
+    key = re.search(r'KEY="([0-9a-f]+)"', c.post("/api/menubar/key").text).group(1); h = {"X-Timer-Key": key}
+    tid = c.post("/api/todo", json={"text": "Old title"}).json()["todos"][-1]["id"]
+    sid = c.post(f"/api/todo/{tid}/sub", json={"text": "Old step"}).json()["todos"][-1]["subs"][0]["id"]
+    l = c.post(f"/api/todo/{tid}", json={"text": "  New title  "}).json()["todos"]; assert [x for x in l if x["id"] == tid][0]["text"] == "New title"
+    l = c.post(f"/api/sub/{sid}", json={"text": "New step"}).json()["todos"]; assert [x for x in l if x["id"] == tid][0]["subs"][0]["text"] == "New step"
+    # from the plugin (a text change, with and without a done change)
+    now = int(time.time())
+    anon.post("/api/todos/sync", headers=h, json={"ops": [{"op": "set", "ref": f"s{tid}", "text": "Edited in the menu bar", "t": now}, {"op": "sset", "ref": f"u{sid}", "text": "Step edited in the menu bar", "t": now}]})
+    t = [x for x in c.get("/api/state").json()["todos"] if x["id"] == tid][0]; assert t["text"] == "Edited in the menu bar" and t["subs"][0]["text"] == "Step edited in the menu bar" and t["subs"][0]["done"] is False
+    anon.post("/api/todos/sync", headers=h, json={"ops": [{"op": "sset", "ref": f"u{sid}", "done": True, "text": "  ", "t": now}]})              # blank text is ignored
+    t = [x for x in c.get("/api/state").json()["todos"] if x["id"] == tid][0]; assert t["subs"][0]["text"] == "Step edited in the menu bar" and t["subs"][0]["done"] is True
+    c.delete(f"/api/todo/{tid}")

@@ -536,8 +536,8 @@ active(){ [ -f "$STATE" ] && { [ "$START" -gt 0 ] || [ "$ACC" -gt 0 ]; }; }
 # ---- to-dos: always shown from the local copy (todos.tsv: ref status prio text; subs.tsv: parent ref done text);
 # every change is applied there AND queued (todo-ops.tsv: op ref status prio time text parent)
 todo_queue(){ printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "${3:--}" "${4:--}" "$NOW" "$5" "${6:--}" >> "$OPS"; }
-todo_apply(){ awk -F'\t' -v OFS='\t' -v r="$1" -v f="$2" -v v="$3" '$1==r{ if(f=="status")$2=v; else $3=v } {print}' "$TODOS" > "$TODOS.tmp" && mv "$TODOS.tmp" "$TODOS"; }
-ask(){ osascript -e "text returned of (display dialog \"$1\" default answer \"\" with title \"Pomodoro\")" 2>/dev/null; }
+todo_apply(){ awk -F'\t' -v OFS='\t' -v r="$1" -v f="$2" -v v="$3" '$1==r{ if(f=="status")$2=v; else if(f=="text")$4=v; else $3=v } {print}' "$TODOS" > "$TODOS.tmp" && mv "$TODOS.tmp" "$TODOS"; }
+ask(){ osascript -e "text returned of (display dialog \"$1\" default answer \"$(printf '%s' "$2" | sed 's/\\/\\\\/g; s/"/\\"/g')\" with title \"Pomodoro\")" 2>/dev/null; }   # $2 = text to start with
 
 # ---- actions of the menus (this script calls itself)
 case "$1" in
@@ -551,6 +551,12 @@ case "$1" in
   todoadd)
     TXT=$(ask "New to-do") || exit 0; TXT=$(line "$TXT"); [ -n "$TXT" ] || exit 0
     REF="c$NOW-$RANDOM"; todo_queue add "$REF" todo 0 "$TXT"; printf '%s\ttodo\t0\t%s\n' "$REF" "$TXT" >> "$TODOS"; exit 0;;
+  todoedit)  # todoedit <ref>: change the text (the dialog starts with the current text)
+    OLD=$(awk -F'\t' -v r="$2" '$1==r{print $4}' "$TODOS"); TXT=$(ask "Edit to-do" "$OLD") || exit 0; TXT=$(line "$TXT"); [ -n "$TXT" ] || exit 0
+    todo_queue set "$2" - - "$TXT"; todo_apply "$2" text "$TXT"; exit 0;;
+  subedit)   # subedit <sub ref>
+    OLD=$(awk -F'\t' -v r="$2" '$2==r{print $4}' "$SUBS"); TXT=$(ask "Edit subtask" "$OLD") || exit 0; TXT=$(line "$TXT"); [ -n "$TXT" ] || exit 0
+    todo_queue sset "$2" - - "$TXT"; awk -F'\t' -v OFS='\t' -v r="$2" -v v="$TXT" '$2==r{$4=v}{print}' "$SUBS" > "$SUBS.tmp" && mv "$SUBS.tmp" "$SUBS"; exit 0;;
   todoset)   # todoset <ref> status|prio <value>
     if [ "$3" = status ]; then todo_queue set "$2" "$4" - ""; else todo_queue set "$2" - "$4" ""; fi
     todo_apply "$2" "$3" "$4"; exit 0;;
@@ -582,7 +588,7 @@ tflush(){
   mv "$OPS" "$OPS.sending"
   JSON=$(awk -F'\t' 'BEGIN{printf "{\"ops\":["} { printf "%s", (NR>1?",":"");
     if($1=="sadd") printf "{\"op\":\"sadd\",\"ref\":\"%s\",\"parent\":\"%s\",\"text\":\"%s\",\"t\":%s}", $2, $7, $6, $5;
-    else if($1=="sset") printf "{\"op\":\"sset\",\"ref\":\"%s\",\"done\":%s,\"t\":%s}", $2, ($3=="1"?"true":"false"), $5;
+    else if($1=="sset") { printf "{\"op\":\"sset\",\"ref\":\"%s\",\"t\":%s", $2, $5; if($3!="-")printf ",\"done\":%s", ($3=="1"?"true":"false"); if($6!="")printf ",\"text\":\"%s\"", $6; printf "}" }
     else if($1=="sdel") printf "{\"op\":\"sdel\",\"ref\":\"%s\",\"t\":%s}", $2, $5;
     else { printf "{\"op\":\"%s\",\"ref\":\"%s\",\"t\":%s", $1, $2, $5; if($3!="-")printf ",\"status\":\"%s\"", $3; if($4!="-")printf ",\"prio\":%s", $4; if($6!="")printf ",\"text\":\"%s\"", $6; printf "}" } }
     END{printf "]}"}' "$OPS.sending")
@@ -606,6 +612,7 @@ task_entry(){   # <prefix> <ref> <status> <prio> <text>
   echo "${PF}$(pico "$PR") $(printf '%s' "$TX" | tr '|' '/' | cut -c1-44)$([ "$NN" -gt 0 ] && echo "   ▸ $DN/$NN")"
   if [ "$ST" = finished ]; then echo "${C}↩ Reopen | bash=\"$SELF\" param1=todoset param2=$REF param3=status param4=todo $A sfimage=arrow.uturn.backward"
   else echo "${C}Finish | bash=\"$SELF\" param1=todoset param2=$REF param3=status param4=finished $A sfimage=checkmark.circle"; fi
+  echo "${C}Edit text… | bash=\"$SELF\" param1=todoedit param2=$REF $A sfimage=pencil"
   echo "${C}---"
   echo "${C}Subtasks$([ "$NN" -gt 0 ] && echo " · $DN/$NN") |$H"
   awk -F'\t' -v OFS='\t' -v p="$REF" '$1==p' "$SUBS" | while IFS=$'\t' read -r _P SR SD SX; do
@@ -615,6 +622,10 @@ task_entry(){   # <prefix> <ref> <status> <prio> <text>
   done
   echo "${C}Add subtask… | bash=\"$SELF\" param1=subadd param2=$REF $A sfimage=plus"
   if [ "$NN" -gt 0 ]; then
+    echo "${C}Edit subtask"
+    awk -F'\t' -v p="$REF" '$1==p' "$SUBS" | while IFS=$'\t' read -r _P SR SD SX; do
+      [ -n "$SR" ] && echo "${C}--✎ $(printf '%s' "$SX" | tr '|' '/' | cut -c1-48) | bash=\"$SELF\" param1=subedit param2=$SR $A"
+    done
     echo "${C}Remove subtask"
     awk -F'\t' -v p="$REF" '$1==p' "$SUBS" | while IFS=$'\t' read -r _P SR SD SX; do
       [ -n "$SR" ] && echo "${C}--✕ $(printf '%s' "$SX" | tr '|' '/' | cut -c1-48) | bash=\"$SELF\" param1=subdel param2=$SR $A"
@@ -770,7 +781,9 @@ def todos_sync(b: TodoSync, req: Request):
                 sid = sub_id(c, o.ref)
                 if sid is None: skipped += 1; continue
                 if o.op == "sdel": c.execute("DELETE FROM subtasks WHERE id=%s", (sid,))
-                elif o.done is not None: c.execute("UPDATE subtasks SET done=%s WHERE id=%s", (o.done, sid))
+                else:
+                    if o.done is not None: c.execute("UPDATE subtasks SET done=%s WHERE id=%s", (o.done, sid))
+                    if o.text and o.text.strip(): c.execute("UPDATE subtasks SET text=%s WHERE id=%s", (o.text.strip()[:200], sid))
                 done += 1
                 continue
             tid = todo_id(c, o.ref)
@@ -780,6 +793,7 @@ def todos_sync(b: TodoSync, req: Request):
                 if st and not (o.t and c.execute("SELECT floor(extract(epoch from status_at)) > %s FROM todos WHERE id=%s", (o.t, tid)).fetchone()[0]):
                     c.execute("UPDATE todos SET status=%s, done=%s, status_at=LEAST(to_timestamp(%s),now()) WHERE id=%s AND status<>%s", (st, st == "finished", o.t or time.time(), tid, st)); done += 1
                 if o.prio is not None and 0 <= o.prio <= 4: c.execute("UPDATE todos SET prio=%s WHERE id=%s", (o.prio or None, tid)); done += 1
+                if o.text and o.text.strip(): c.execute("UPDATE todos SET text=%s WHERE id=%s", (o.text.strip()[:200], tid)); done += 1
     return {"applied": done, "skipped": skipped}
 
 class OfflineSession(BaseModel): id: str; end: int; seconds: int; project: str = ""
