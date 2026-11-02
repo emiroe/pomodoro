@@ -233,3 +233,15 @@ def test_todo_api_token(c):
     assert anon.delete(f"/api/v1/todos/{item['id']}", headers={"Authorization": "Bearer " + tok2}).status_code == 200
     assert c.delete("/api/apitoken").status_code == 200 and anon.get("/api/v1/todos", headers={"Authorization": "Bearer " + tok2}).status_code == 401
     for t in c.get("/api/state").json()["todos"]: c.delete(f"/api/todo/{t['id']}")
+
+def test_inprogress_status(c):
+    c.post("/api/login", json={"password": os.environ["EDIT_PASSWORD"]})
+    t = c.post("/api/todo", json={"text": "Doing it now", "status": "inprogress"}).json()["todos"][-1]; assert t["status"] == "inprogress"
+    assert {x["id"]: x["status"] for x in c.post(f"/api/todo/{t['id']}", json={"status": "hold"}).json()["todos"]}[t["id"]] == "hold"
+    assert {x["id"]: x["status"] for x in c.post(f"/api/todo/{t['id']}", json={"status": "inprogress"}).json()["todos"]}[t["id"]] == "inprogress"
+    key = re.search(r'KEY="([0-9a-f]+)"', c.post("/api/menubar/key").text).group(1)
+    from fastapi.testclient import TestClient as TC
+    anon = TC(main.app, base_url="https://testserver")
+    assert f"s{t['id']}\tinprogress" in anon.get("/api/menubar", headers={"X-Timer-Key": key}).text      # reaches the plugin's copy
+    assert "inprogress" in anon.get("/api/menubar", headers={"X-Timer-Key": key}).text and "In Progress" in main.PLUGIN
+    c.delete(f"/api/todo/{t['id']}")

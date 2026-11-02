@@ -141,7 +141,7 @@ def state(req: Request):
         api_hash = c.execute("SELECT 1 FROM settings WHERE key='api_token_hash'").fetchone()
     return {"edit": authed(req), "sessions": [srow(r) for r in rows], "projects": projects, "settings": st, "today": today().isoformat(), "todos": todos, "api_token": authed(req) and bool(api_hash)}
 
-TODO_STATUS = ("todo", "hold", "review", "finished")
+TODO_STATUS = ("todo", "inprogress", "hold", "review", "finished")
 
 def todo_list(c):
     return [{"id": r[0], "text": r[1], "status": r[2], "at": int(r[3].timestamp()), "prio": r[4], "pos": r[5]}
@@ -520,8 +520,8 @@ todo_menu(){
   A="terminal=false refresh=true"
   echo "---"; echo "To do ($(awk -F'\t' '$2!="finished"' "$TODOS" | wc -l | tr -d ' '))"
   echo "--Add to-do… | bash=\"$SELF\" param1=todoadd $A"
-  for TAB in todo hold review finished; do
-    case $TAB in todo) LBL="To Do";; hold) LBL="On Hold";; review) LBL="Review";; *) LBL="Finished";; esac
+  for TAB in todo inprogress hold review finished; do
+    case $TAB in todo) LBL="To Do";; inprogress) LBL="In Progress";; hold) LBL="On Hold";; review) LBL="Review";; *) LBL="Finished";; esac
     CNT=$(awk -F'\t' -v t="$TAB" '$2==t' "$TODOS" | wc -l | tr -d ' ')
     echo "--$LBL ($CNT)"
     awk -F'\t' -v OFS='\t' -v t="$TAB" '$2==t{k=($3>0?$3:5)*100000+NR; if(t=="finished")k=NR; print k,$0}' "$TODOS" | sort -n | head -12 | while IFS=$'\t' read -r K REF ST PR TX; do
@@ -529,9 +529,9 @@ todo_menu(){
       B="•"; [ "$PR" -gt 0 ] 2>/dev/null && B="P$PR"
       echo "----$B $(printf '%s' "$TX" | tr '|' '/' | cut -c1-60)"
       [ "$ST" != finished ] && echo "------✓ Finish | bash=\"$SELF\" param1=todoset param2=$REF param3=status param4=finished $A"
-      for S2 in todo hold review; do
+      for S2 in todo inprogress hold review; do
         [ "$S2" = "$ST" ] && continue
-        case $S2 in todo) N2="To Do";; hold) N2="On Hold";; *) N2="Review";; esac
+        case $S2 in todo) N2="To Do";; inprogress) N2="In Progress";; hold) N2="On Hold";; *) N2="Review";; esac
         echo "------Move to $N2 | bash=\"$SELF\" param1=todoset param2=$REF param3=status param4=$S2 $A"
       done
       for P in 1 2 3 4 0; do

@@ -84,7 +84,7 @@ form .row>*{flex:1 1 120px}
 
 <form class="card hide" id="login" autocomplete="on"><div class="row"><input type="password" id="pw" placeholder="Edit password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" required><button class="btn pri" style="flex:0 0 auto">Log in</button></div></form>
 <div class="card hide" id="todoCard"><h2>To do <button class="btn sm hide" id="todoClear" style="text-transform:none;letter-spacing:0;font-size:11px;padding:2px 8px">Clear finished</button></h2>
-<div class="seg" id="todoTabs" style="display:flex;margin-bottom:6px"></div>
+<div class="seg" id="todoTabs" style="display:flex;margin-bottom:6px;overflow-x:auto;scrollbar-width:none"></div>
 <div id="todoList"></div><form id="todoForm" autocomplete="off" style="margin-top:6px"><input id="todoNew" placeholder="Add a to-do" maxlength="200" enterkeyhint="done" style="width:100%"></form></div>
 <div class="card hide" id="timerCard"><div class="tpanel" id="tp"><div class="ring" id="ring"><div class="in"><div class="timer" id="clock">25:00</div><small id="phase">Focus</small></div></div>
 <div class="tside"><div class="dots" id="dots"></div>
@@ -189,10 +189,10 @@ function streaks(by,t0,first){
  while(d>=first){if(by[iso(d)])cur++;else if(WORK.includes(d.getDay()))break;d.setDate(d.getDate()-1)}
  return{cur,best}}
 
-const TABS=[['todo','To Do'],['hold','On Hold'],['review','Review'],['finished','Finished']];
+const TABS=[['todo','To Do'],['inprogress','In Progress'],['hold','On Hold'],['review','Review'],['finished','Finished']];
 let tdTab='todo';const tdLimit={};try{const v=localStorage.getItem('pmTodoTab');if(TABS.some(t=>t[0]==v))tdTab=v}catch(_){}
 function renderTodos(){const L=S.todos||[],n=k=>L.filter(t=>t.status==k).length;
- $('todoTabs').innerHTML=TABS.map(([k,l])=>`<button data-tab="${k}" class="${k==tdTab?'on':''}" style="flex:1;padding:4px 2px;font-size:12px">${l}${n(k)?` ${n(k)}`:''}</button>`).join('');
+ $('todoTabs').innerHTML=TABS.map(([k,l])=>`<button data-tab="${k}" class="${k==tdTab?'on':''}" style="flex:1 1 auto;padding:4px 3px;font-size:11px;white-space:nowrap">${l}${n(k)?`<sup style="font-size:9px;margin-left:2px;opacity:.8">${n(k)}</sup>`:''}</button>`).join('');
  $('todoClear').classList.toggle('hide',tdTab!='finished'||!n('finished'));$('todoForm').classList.toggle('hide',tdTab=='finished');
  const all=L.filter(t=>t.status==tdTab).sort((a,b)=>tdTab=='finished'?b.at-a.at:(a.prio||5)-(b.prio||5)||a.pos-b.pos||a.id-b.id),lim=tdLimit[tdTab]||10,items=all.slice(0,lim);   // 10 per tab, 'Load more' adds 10; sorted P1 first, no priority last, same priority = your drag order; Finished = newest finished first
  $('todoList').innerHTML=items.length?items.map(t=>`<div class="td${t.status=='finished'?' done':''}" data-id="${t.id}">${tdTab=='finished'?'':'<span class="h" data-drag="1" title="Drag to reorder (within the same priority)">⋮⋮</span>'}<input type="checkbox" data-t="${t.id}"${t.status=='finished'?' checked':''}><button class="pr${t.prio||0}" data-p="${t.id}" title="Priority (tap to change)">${t.prio?'P'+t.prio:'P'}</button><span class="tx">${esc(t.text)}</span>
@@ -269,7 +269,7 @@ function renderApi(tok){const o=location.origin,T=tok||'YOUR_TOKEN',c='style="wo
  $('apiHelp').innerHTML=`<b style="color:var(--txt)">To-do API</b> for scripts and shortcuts. The token can only add, list, change and delete to-dos.<br>
  ${tok?`<b style="color:var(--txt)">Your new token (shown once, copy it now):</b><input readonly value="${tok}" onclick="this.select()" style="width:100%;margin:6px 0"><br>`:S.api_token?'A token is active. A new one replaces it.<br>':'No token yet.<br>'}
  <div class="row" style="margin:6px 0"><button class="btn sm" id="apiNew">${S.api_token?'Make a new token':'Create token'}</button>${S.api_token?'<button class="btn sm" id="apiRevoke">Revoke token</button>':''}</div>
- Add a to-do (status todo|hold|review|finished, prio 0-4):<code ${c}>curl -X POST ${o}/api/v1/todos -H "Authorization: Bearer ${T}" -H "Content-Type: application/json" -d '{"text":"Renew certificate","prio":2}'</code>
+ Add a to-do (status todo|inprogress|hold|review|finished, prio 0-4):<code ${c}>curl -X POST ${o}/api/v1/todos -H "Authorization: Bearer ${T}" -H "Content-Type: application/json" -d '{"text":"Renew certificate","prio":2}'</code>
  Simplest form, e.g. for a Shortcut:<code ${c}>curl -X POST -H "Authorization: Bearer ${T}" "${o}/api/v1/todos?text=Buy%20milk"</code>
  Also: GET /api/v1/todos[?status=todo], PATCH /api/v1/todos/ID {"status":"finished"}, DELETE /api/v1/todos/ID.`;
  $('apiNew').onclick=async()=>{if(S.api_token&&!confirm('Make a new token? The old one stops working.'))return;try{const r=await api('POST','/api/apitoken');S.api_token=true;renderApi(r.token)}catch(e){toast(e.message)}};
