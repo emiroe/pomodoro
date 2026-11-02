@@ -1,11 +1,14 @@
 #!/bin/bash
-# CD (agent box, user timer pomodoro-deploy every 5 min). No GitHub remote yet: deploys the local main commit to the Docker host,
+# Pull-based CD (runs on the agent box, user timer pomodoro-deploy every 5 min). Deploys the pushed origin/main commit to the Docker host,
 # health-checks it, rolls back to the previous commit on failure. State: ~/pomodoro/.deployed on the Docker host.
 set -u
 REPO=/home/crn/pomodoro; HOST=crn@192.168.1.50; LOG=/home/crn/pomodoro-deploy/deploy.log
 log(){ echo "$(date '+%F %T') $*" | tee -a $LOG; }
 cd $REPO || exit 1
+git fetch -q origin main || { log "fetch failed"; exit 1; }
+if [ -z "$(git status --porcelain)" ]; then git merge -q --ff-only origin/main 2>/dev/null; fi
 HEAD=$(git rev-parse HEAD)
+git merge-base --is-ancestor "$HEAD" origin/main || { log "HEAD $HEAD not pushed yet: not deploying"; exit 0; }
 DEPLOYED=$(ssh $HOST 'cat ~/pomodoro/.deployed 2>/dev/null')
 [ "$DEPLOYED" = "$HEAD" ] && exit 0
 push(){ # $1 = commit

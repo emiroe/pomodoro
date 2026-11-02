@@ -1,0 +1,26 @@
+name: CI
+on:
+  push: {branches: [main]}
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: {POSTGRES_USER: pomodoro, POSTGRES_PASSWORD: pomodoro, POSTGRES_DB: pomodoro}
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pomodoro -d pomodoro" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://pomodoro:pomodoro@localhost:5432/pomodoro
+      SECRET_KEY: ci-secret
+      EDIT_PASSWORD: ci-password
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install fastapi "uvicorn[standard]" "psycopg[binary]" psycopg_pool httpx pytest
+      - run: cd app && python -m pytest ../tests -q
+      - name: Docker image builds
+        run: docker build -t pomodoro:ci .
